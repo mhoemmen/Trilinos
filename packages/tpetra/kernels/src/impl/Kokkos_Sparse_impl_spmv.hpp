@@ -161,6 +161,10 @@ struct SPMV_Transpose_Functor {
   }
 };
 
+// Functor for single-vector, non-transpose sparse matrix-vector multiply.
+//
+// If doalpha == 2, this accepts any alpha value.
+// If dobeta == 2, this accepts any beta value.
 template<class AMatrix,
          class XVector,
          class YVector,
@@ -194,7 +198,12 @@ struct SPMV_Functor {
     alpha (alpha_), m_A (m_A_), m_x (m_x_),
     beta (beta_), m_y (m_y_),
     rows_per_thread (rows_per_thread_)
-  {}
+  {
+    static_assert (static_cast<int> (XVector::rank) == 1,
+                   "XVector must be a rank 1 View.");
+    static_assert (static_cast<int> (YVector::rank) == 1,
+                   "YVector must be a rank 1 View.");
+  }
 
   KOKKOS_INLINE_FUNCTION void
   operator() (const team_member& dev) const
@@ -273,6 +282,10 @@ struct SPMV_Functor {
   }
 };
 
+// Single-vector, non-transpose sparse matrix-vector multiply.
+//
+// If doalpha == 2, this accepts any alpha value.
+// If dobeta == 2, this accepts any beta value.
 template<class AMatrix,
          class XVector,
          class YVector,
@@ -308,6 +321,9 @@ static void spmv_alpha_beta_no_transpose(typename AMatrix::const_value_type& alp
 
 #ifndef KOKKOS_FAST_COMPILE // This uses templated functions on doalpha and dobeta and will produce 16
 
+    // FIXME (mfh 17 Feb 2016) We've already handled the dobeta == 2
+    // case above by scaling y, so we really don't need dobeta == 2
+    // here -- or do we?
     typedef SPMV_Functor<AMatrix, XVector, YVector, doalpha, dobeta , conjugate, SizeType> OpType ;
 
     typename AMatrix::const_ordinal_type nrow = A.numRows();
@@ -342,6 +358,10 @@ static void spmv_alpha_beta_no_transpose(typename AMatrix::const_value_type& alp
   }
 }
 
+// Single-vector, transpose sparse matrix-vector multiply.
+//
+// If doalpha == 2, this accepts any alpha value.
+// If dobeta == 2, this accepts any beta value.
 template<class AMatrix,
          class XVector,
          class YVector,
