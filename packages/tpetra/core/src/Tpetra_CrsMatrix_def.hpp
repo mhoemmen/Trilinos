@@ -897,8 +897,9 @@ namespace Tpetra {
         " = " << h_ptrs.dimension_0 () << " != (lclNumRows+1) = "
         << (lclNumRows+1) << ".");
       // FIXME (mfh 08 Aug 2014) This assumes UVM.
-      TEUCHOS_TEST_FOR_EXCEPTION(
-        k_ptrs(lclNumRows) != lclTotalNumEntries, std::logic_error,
+      TEUCHOS_TEST_FOR_EXCEPTION
+        (static_cast<size_t> (k_ptrs(lclNumRows)) !=
+         static_cast<size_t> (lclTotalNumEntries), std::logic_error,
         "Tpetra::CrsMatrix::fillLocalGraphAndMatrix: In DynamicProfile branch, "
         "after packing k_ptrs, k_ptrs(lclNumRows = " << lclNumRows << ") = " <<
         k_ptrs(lclNumRows) << " != total number of entries on the calling "
@@ -966,7 +967,8 @@ namespace Tpetra {
         // FIXME (mfh 06 Aug 2014) This relies on UVM.
         TEUCHOS_TEST_FOR_EXCEPTION(
           numOffsets != 0 &&
-          myGraph_->k_lclInds1D_.dimension_0 () != curRowOffsets(numOffsets - 1),
+          static_cast<size_t> (myGraph_->k_lclInds1D_.dimension_0 ()) !=
+          static_cast<size_t> (curRowOffsets(numOffsets - 1)),
           std::logic_error, "Tpetra::CrsMatrix::fillLocalGraphAndMatrix: "
           "numOffsets = " << numOffsets << " != 0 and "
           "myGraph_->k_lclInds1D_.dimension_0() = "
@@ -993,8 +995,9 @@ namespace Tpetra {
         if (curRowOffsets.dimension_0 () != 0) {
           const size_t numOffsets =
             static_cast<size_t> (curRowOffsets.dimension_0 ());
-          TEUCHOS_TEST_FOR_EXCEPTION(
-            curRowOffsets(numOffsets-1) != static_cast<size_t> (k_values1D_.dimension_0 ()),
+          TEUCHOS_TEST_FOR_EXCEPTION
+            (static_cast<size_t> (curRowOffsets(numOffsets-1)) !=
+             static_cast<size_t> (k_values1D_.dimension_0 ()),
             std::logic_error, "Tpetra::CrsMatrix::fillLocalGraphAndMatrix: "
             "In StaticProfile branch, before allocating or packing, "
             "curRowOffsets(" << (numOffsets-1) << ") = "
@@ -1054,8 +1057,9 @@ namespace Tpetra {
           "k_ptrs.dimension_0() = " << k_ptrs.dimension_0 () << " != "
           "lclNumRows+1 = " << (lclNumRows+1) << ".");
         // FIXME (mfh 06 Aug 2014) This assumes UVM.
-        TEUCHOS_TEST_FOR_EXCEPTION(
-          k_ptrs(lclNumRows) != lclTotalNumEntries, std::logic_error,
+        TEUCHOS_TEST_FOR_EXCEPTION
+          (static_cast<size_t> (k_ptrs(lclNumRows)) !=
+           static_cast<size_t> (lclTotalNumEntries), std::logic_error,
           "Tpetra::CrsMatrix::fillLocalGraphAndMatrix: In StaticProfile "
           "unpacked-but-pack branch, after filling k_ptrs, k_ptrs(lclNumRows="
           << lclNumRows << ") = " << k_ptrs(lclNumRows) << " != total number "
@@ -1342,8 +1346,9 @@ namespace Tpetra {
         " = " << h_ptrs.dimension_0 () << " != (lclNumRows+1) = "
         << (lclNumRows+1) << ".");
       // FIXME (mfh 08 Aug 2014) This assumes UVM.
-      TEUCHOS_TEST_FOR_EXCEPTION(
-        k_ptrs(lclNumRows) != lclTotalNumEntries, std::logic_error,
+      TEUCHOS_TEST_FOR_EXCEPTION
+        (static_cast<size_t> (k_ptrs(lclNumRows)) !=
+         static_cast<size_t> (lclTotalNumEntries), std::logic_error,
         "Tpetra::CrsMatrix::fillLocalMatrix: In DynamicProfile branch, "
         "after packing k_ptrs, k_ptrs(lclNumRows = " << lclNumRows << ") = " <<
         k_ptrs(lclNumRows) << " != total number of entries on the calling "

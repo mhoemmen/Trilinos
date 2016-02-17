@@ -229,7 +229,8 @@ int main (int argc, char* argv[]) {
 
   // Use a parallel scan (prefix sum) over the array of row counts, to
   // compute the array of row offsets for the sparse graph.
-  Kokkos::View<size_t*> rowOffsets ("row offsets", numLclRows+1);
+  typedef Tpetra::CrsMatrix<>::local_graph_type::size_type offset_type;
+  Kokkos::View<offset_type*> rowOffsets ("row offsets", numLclRows+1);
   Kokkos::parallel_scan (numLclRows+1,
     KOKKOS_LAMBDA (const LO lclRows, size_t& update, const bool final) {
       if (final) {

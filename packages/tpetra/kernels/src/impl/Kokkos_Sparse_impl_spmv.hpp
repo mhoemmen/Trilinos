@@ -55,6 +55,131 @@
 #define KOKKOSSPARSE_ETI_ONLY
 #endif
 
+#ifdef HAVE_TPETRAKERNELS_MKL
+#include <mkl.h>
+#include <cstdlib> // getenv
+#include <cstring> // strncmp
+#endif // HAVE_TPETRAKERNELS_MKL
+
+namespace { // (anonymous)
+
+  template<class ValueType, class IndexType, class OffsetType, class DeviceType>
+  struct TryMklOneVec {
+    typedef KokkosSparse::CrsMatrix<const ValueType, IndexType, DeviceType,
+                                    Kokkos::MemoryTraits<Kokkos::Unmanaged>,
+                                    OffsetType> matrix_type;
+    typedef Kokkos::View<const ValueType*, Kokkos::LayoutLeft, DeviceType,
+                         Kokkos::MemoryTraits<Kokkos::Unmanaged |
+                                              Kokkos::RandomAccess> >
+      x_vec_type;
+    typedef Kokkos::View<ValueType*, Kokkos::LayoutLeft, DeviceType,
+                         Kokkos::MemoryTraits<Kokkos::Unmanaged> > y_vec_type;
+
+    // Return value: Whether we actually used MKL.
+    // If not, use our native implementation.
+    static bool
+    tryMkl (const char mode[],
+            const ValueType& alpha,
+            const matrix_type& A,
+            const x_vec_type& x,
+            const ValueType& beta,
+            const y_vec_type& y)
+    {
+      // Default is not to use MKL, because MKL only supports certain types.
+      return false;
+    }
+  };
+
+#if defined(HAVE_TPETRAKERNELS_MKL) && defined(KOKKOS_HAVE_OPENMP)
+  template<>
+  struct TryMklOneVec<double, MKL_INT, MKL_INT, Kokkos::Device<Kokkos::OpenMP, Kokkos::HostSpace> > {
+    typedef double ValueType;
+    typedef MKL_INT IndexType;
+    typedef MKL_INT OffsetType;
+    typedef Kokkos::Device<Kokkos::OpenMP, Kokkos::HostSpace> DeviceType;
+
+    typedef KokkosSparse::CrsMatrix<const ValueType, IndexType, DeviceType,
+                                    Kokkos::MemoryTraits<Kokkos::Unmanaged>,
+                                    OffsetType> matrix_type;
+    typedef Kokkos::View<const ValueType*, Kokkos::LayoutLeft, DeviceType,
+                         Kokkos::MemoryTraits<Kokkos::Unmanaged |
+                                              Kokkos::RandomAccess> >
+      x_vec_type;
+    typedef Kokkos::View<ValueType*, Kokkos::LayoutLeft, DeviceType,
+                         Kokkos::MemoryTraits<Kokkos::Unmanaged> > y_vec_type;
+
+    static bool
+    tryMkl (const char mode[],
+            const ValueType& alpha,
+            const matrix_type& A,
+            const x_vec_type& x,
+            const ValueType& beta,
+            const y_vec_type& y)
+    {
+      // WARNING (17 Feb 2016) POSIX does not require getenv() to be
+      // reentrant.  Thus, it might not be safe to call this function
+      // concurrently on multiple threads, even with different data on
+      // different threads.  As a result, it's OK for us to make this
+      // function nonreentrant, so that we can avoid the overhead of
+      // calling getenv after the first call.
+      static bool notFirstCall = false;
+      static bool useMkl = false;
+
+      if (! notFirstCall) {
+        const char envKey[] = "TPETRA_USE_MKL_SPMV";
+        const char* const envVal = getenv (envKey);
+        if (envVal == NULL) {
+          useMkl = false;
+        }
+        else {
+          if (strncmp (envVal, "1", 1) ||
+              strncmp (envVal, "ON", 2) ||
+              strncmp (envVal, "YES", 3) ||
+              strncmp (envVal, "TRUE", 4)) {
+            useMkl = true;
+          }
+          else {
+            useMkl = false;
+          }
+        }
+        notFirstCall = true;
+      }
+
+      if (! useMkl) {
+        return false;
+      }
+      else { // useMkl
+        const char* mklMode = (mode[0] == 'H' || mode[0] == 'h') ? "C" : mode;
+        const MKL_INT numRows = A.numRows ();
+        // If numRows == 0, then the ptr array may be empty (instead of
+        // having one entry as it should).  Don't try to access ptr[1]
+        // in that case.
+        if (numRows > 0) {
+          char matdesc[4];
+          matdesc[0] = 'G';
+          matdesc[1] = 'N'; // neither upper nor lower tri (mat-vec ignores this)
+          matdesc[2] = 'N'; // explicitly stored diagonal
+          matdesc[3] = 'C'; // zero-based (C style) indexing
+
+          auto rowBeg = A.graph.row_map;
+          const std::pair<size_t, size_t> range (1, A.graph.row_map.dimension_0 ());
+          auto rowEnd = Kokkos::subview (A.graph.row_map, range);
+          const MKL_INT numCols = A.numCols ();
+          mkl_dcsrmv (mklMode, &numRows, &numCols, &alpha, matdesc,
+                      A.values.ptr_on_device (),
+                      A.graph.entries.ptr_on_device (),
+                      rowBeg.ptr_on_device (), rowEnd.ptr_on_device (),
+                      x.ptr_on_device (), &beta, y.ptr_on_device ());
+        }
+        return true; // successfully used MKL
+      }
+    }
+  };
+#endif // HAVE_TPETRAKERNELS_MKL
+} // namespace (anonymous)
+
+
+
 namespace KokkosSparse {
 namespace Impl {
 
@@ -534,19 +659,24 @@ struct SPMV
   spmv (const char mode[], const Scalar& alpha, const AMatrix& A,
         const XVector& x, const Scalar& beta, const YVector& y)
   {
-    if (alpha == Kokkos::Details::ArithTraits<Scalar>::zero ()) {
-      spmv_alpha<AMatrix,XVector,YVector,0> (mode, alpha, A, x, beta, y);
-      return;
+    typedef TryMklOneVec<Scalar, AO, AS, AD> try_mkl_type;
+    const bool didMkl = try_mkl_type::tryMkl (mode, alpha, A, x, beta, y);
+
+    if (! didMkl) {
+      if (alpha == Kokkos::Details::ArithTraits<Scalar>::zero ()) {
+        spmv_alpha<AMatrix,XVector,YVector,0> (mode, alpha, A, x, beta, y);
+        return;
+      }
+      if (alpha == Kokkos::Details::ArithTraits<Scalar>::one ()) {
+        spmv_alpha<AMatrix,XVector,YVector,1> (mode, alpha, A, x, beta, y);
+        return;
+      }
+      if (alpha == -Kokkos::Details::ArithTraits<Scalar>::one ()) {
+        spmv_alpha<AMatrix,XVector,YVector,-1> (mode, alpha, A, x, beta, y);
+        return;
+      }
+      spmv_alpha<AMatrix,XVector,YVector,2> (mode, alpha, A, x, beta, y);
     }
-    if (alpha == Kokkos::Details::ArithTraits<Scalar>::one ()) {
-      spmv_alpha<AMatrix,XVector,YVector,1> (mode, alpha, A, x, beta, y);
-      return;
-    }
-    if (alpha == -Kokkos::Details::ArithTraits<Scalar>::one ()) {
-      spmv_alpha<AMatrix,XVector,YVector,-1> (mode, alpha, A, x, beta, y);
-      return;
-    }
-    spmv_alpha<AMatrix,XVector,YVector,2> (mode, alpha, A, x, beta, y);
   }
 }
 #endif
@@ -608,41 +738,41 @@ struct SPMV<const SCALAR_TYPE, \
 
 #ifdef KOKKOS_HAVE_SERIAL
 
-KOKKOSSPARSE_IMPL_SPMV_DECL( int, int, size_t, Kokkos::LayoutLeft, Kokkos::Serial, Kokkos::HostSpace )
-KOKKOSSPARSE_IMPL_SPMV_DECL( long, int, size_t, Kokkos::LayoutLeft, Kokkos::Serial, Kokkos::HostSpace )
-KOKKOSSPARSE_IMPL_SPMV_DECL( double, int, size_t, Kokkos::LayoutLeft, Kokkos::Serial, Kokkos::HostSpace )
+KOKKOSSPARSE_IMPL_SPMV_DECL( int, int, int, Kokkos::LayoutLeft, Kokkos::Serial, Kokkos::HostSpace )
+KOKKOSSPARSE_IMPL_SPMV_DECL( long, int, int, Kokkos::LayoutLeft, Kokkos::Serial, Kokkos::HostSpace )
+KOKKOSSPARSE_IMPL_SPMV_DECL( double, int, int, Kokkos::LayoutLeft, Kokkos::Serial, Kokkos::HostSpace )
 
 #endif // KOKKOS_HAVE_SERIAL
 
 #ifdef KOKKOS_HAVE_OPENMP
 
-KOKKOSSPARSE_IMPL_SPMV_DECL( int, int, size_t, Kokkos::LayoutLeft, Kokkos::OpenMP, Kokkos::HostSpace )
-KOKKOSSPARSE_IMPL_SPMV_DECL( long, int, size_t, Kokkos::LayoutLeft, Kokkos::OpenMP, Kokkos::HostSpace )
-KOKKOSSPARSE_IMPL_SPMV_DECL( double, int, size_t, Kokkos::LayoutLeft, Kokkos::OpenMP, Kokkos::HostSpace )
+KOKKOSSPARSE_IMPL_SPMV_DECL( int, int, int, Kokkos::LayoutLeft, Kokkos::OpenMP, Kokkos::HostSpace )
+KOKKOSSPARSE_IMPL_SPMV_DECL( long, int, int, Kokkos::LayoutLeft, Kokkos::OpenMP, Kokkos::HostSpace )
+KOKKOSSPARSE_IMPL_SPMV_DECL( double, int, int, Kokkos::LayoutLeft, Kokkos::OpenMP, Kokkos::HostSpace )
 
 #endif // KOKKOS_HAVE_OPENMP
 
 #ifdef KOKKOS_HAVE_PTHREAD
 
-KOKKOSSPARSE_IMPL_SPMV_DECL( int, int, size_t, Kokkos::LayoutLeft, Kokkos::Threads, Kokkos::HostSpace )
-KOKKOSSPARSE_IMPL_SPMV_DECL( long, int, size_t, Kokkos::LayoutLeft, Kokkos::Threads, Kokkos::HostSpace )
-KOKKOSSPARSE_IMPL_SPMV_DECL( double, int, size_t, Kokkos::LayoutLeft, Kokkos::Threads, Kokkos::HostSpace )
+KOKKOSSPARSE_IMPL_SPMV_DECL( int, int, int, Kokkos::LayoutLeft, Kokkos::Threads, Kokkos::HostSpace )
+KOKKOSSPARSE_IMPL_SPMV_DECL( long, int, int, Kokkos::LayoutLeft, Kokkos::Threads, Kokkos::HostSpace )
+KOKKOSSPARSE_IMPL_SPMV_DECL( double, int, int, Kokkos::LayoutLeft, Kokkos::Threads, Kokkos::HostSpace )
 
 #endif // KOKKOS_HAVE_PTHREAD
 
+// #ifdef KOKKOS_HAVE_CUDA
+
+// KOKKOSSPARSE_IMPL_SPMV_DECL( int, int, int, Kokkos::LayoutLeft, Kokkos::Cuda, Kokkos::CudaSpace )
+// KOKKOSSPARSE_IMPL_SPMV_DECL( long, int, int, Kokkos::LayoutLeft, Kokkos::Cuda, Kokkos::CudaSpace )
+// KOKKOSSPARSE_IMPL_SPMV_DECL( double, int, int, Kokkos::LayoutLeft, Kokkos::Cuda, Kokkos::CudaSpace )
+
+// #endif // KOKKOS_HAVE_CUDA
+
 #ifdef KOKKOS_HAVE_CUDA
 
-KOKKOSSPARSE_IMPL_SPMV_DECL( int, int, size_t, Kokkos::LayoutLeft, Kokkos::Cuda, Kokkos::CudaSpace )
-KOKKOSSPARSE_IMPL_SPMV_DECL( long, int, size_t, Kokkos::LayoutLeft, Kokkos::Cuda, Kokkos::CudaSpace )
-KOKKOSSPARSE_IMPL_SPMV_DECL( double, int, size_t, Kokkos::LayoutLeft, Kokkos::Cuda, Kokkos::CudaSpace )
-
-#endif // KOKKOS_HAVE_CUDA
-
-#ifdef KOKKOS_HAVE_CUDA
-
-KOKKOSSPARSE_IMPL_SPMV_DECL( int, int, size_t, Kokkos::LayoutLeft, Kokkos::Cuda, Kokkos::CudaUVMSpace )
-KOKKOSSPARSE_IMPL_SPMV_DECL( long, int, size_t, Kokkos::LayoutLeft, Kokkos::Cuda, Kokkos::CudaUVMSpace )
-KOKKOSSPARSE_IMPL_SPMV_DECL( double, int, size_t, Kokkos::LayoutLeft, Kokkos::Cuda, Kokkos::CudaUVMSpace )
+KOKKOSSPARSE_IMPL_SPMV_DECL( int, int, int, Kokkos::LayoutLeft, Kokkos::Cuda, Kokkos::CudaUVMSpace )
+KOKKOSSPARSE_IMPL_SPMV_DECL( long, int, int, Kokkos::LayoutLeft, Kokkos::Cuda, Kokkos::CudaUVMSpace )
+KOKKOSSPARSE_IMPL_SPMV_DECL( double, int, int, Kokkos::LayoutLeft, Kokkos::Cuda, Kokkos::CudaUVMSpace )
 
 #endif // KOKKOS_HAVE_CUDA
 
@@ -677,19 +807,24 @@ SPMV<const SCALAR_TYPE, \
 spmv (const char mode[], const Scalar& alpha, const AMatrix& A, \
       const XVector& x, const Scalar& beta, const YVector& y) \
 { \
-  if (alpha == Kokkos::Details::ArithTraits<Scalar>::zero ()) { \
-    spmv_alpha<AMatrix,XVector,YVector,0> (mode, alpha, A, x, beta, y); \
-    return; \
+  typedef TryMklOneVec<SCALAR_TYPE, ORDINAL_TYPE, OFFSET_TYPE, Kokkos::Device<EXEC_SPACE_TYPE, MEM_SPACE_TYPE> > try_mkl_type; \
+  const bool didMkl = try_mkl_type::tryMkl (mode, alpha, A, x, beta, y); \
+  \
+  if (! didMkl) { \
+    if (alpha == Kokkos::Details::ArithTraits<Scalar>::zero ()) { \
+      spmv_alpha<AMatrix,XVector,YVector,0> (mode, alpha, A, x, beta, y); \
+      return; \
+    } \
+    if (alpha == Kokkos::Details::ArithTraits<Scalar>::one ()) { \
+      spmv_alpha<AMatrix,XVector,YVector,1> (mode, alpha, A, x, beta, y); \
+      return; \
+    } \
+    if (alpha == -Kokkos::Details::ArithTraits<Scalar>::one ()) { \
+      spmv_alpha<AMatrix,XVector,YVector,-1> (mode, alpha, A, x, beta, y); \
+      return; \
+    } \
+    spmv_alpha<AMatrix,XVector,YVector,2> (mode, alpha, A, x, beta, y); \
   } \
-  if (alpha == Kokkos::Details::ArithTraits<Scalar>::one ()) { \
-    spmv_alpha<AMatrix,XVector,YVector,1> (mode, alpha, A, x, beta, y); \
-    return; \
-  } \
-  if (alpha == -Kokkos::Details::ArithTraits<Scalar>::one ()) { \
-    spmv_alpha<AMatrix,XVector,YVector,-1> (mode, alpha, A, x, beta, y); \
-    return; \
-  } \
-  spmv_alpha<AMatrix,XVector,YVector,2> (mode, alpha, A, x, beta, y); \
 }
 
 

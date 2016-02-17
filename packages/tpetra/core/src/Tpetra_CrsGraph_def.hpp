@@ -490,8 +490,9 @@ namespace Tpetra {
     TEUCHOS_TEST_FOR_EXCEPTION_CLASS_FUNC(
       colMap.is_null (), std::runtime_error,
       ": The input column Map must be nonnull.");
-    TEUCHOS_TEST_FOR_EXCEPTION_CLASS_FUNC(
-      k_local_graph_.numRows () != rowMap->getNodeNumElements (),
+    TEUCHOS_TEST_FOR_EXCEPTION_CLASS_FUNC
+      (static_cast<size_t> (k_local_graph_.numRows ()) !=
+       static_cast<size_t> (rowMap->getNodeNumElements ()),
       std::runtime_error,
       ": The input row Map and the input local graph need to have the same "
       "number of rows.  The row Map claims " << rowMap->getNodeNumElements ()
@@ -560,7 +561,9 @@ namespace Tpetra {
           if (localRow < largestCol) {
             lowerTriangular_ = false;
           }
-          for (size_t i = d_ptrs(rlcid); i < d_ptrs(rlcid + 1); ++i) {
+
+          typedef typename std::decay<decltype (d_ptrs(rlcid)) >::type index_type;
+          for (index_type i = d_ptrs(rlcid); i < d_ptrs(rlcid + 1); ++i) {
             if (d_inds(i) == rlcid) {
               ++nodeNumDiags_;
             }
@@ -2310,14 +2313,18 @@ namespace Tpetra {
 
     TEUCHOS_TEST_FOR_EXCEPTION(
       isGloballyIndexed () && k_rowPtrs_.dimension_0 () != 0 &&
-      (static_cast<size_t> (k_rowPtrs_.dimension_0 ()) != getNodeNumRows () + 1 ||
-       k_rowPtrs_(getNodeNumRows ()) != static_cast<size_t> (k_gblInds1D_.dimension_0 ())),
+      (static_cast<size_t> (k_rowPtrs_.dimension_0 ()) !=
+       static_cast<size_t> (getNodeNumRows () + 1) ||
+       static_cast<size_t> (k_rowPtrs_(getNodeNumRows ())) !=
+       static_cast<size_t> (k_gblInds1D_.dimension_0 ())),
       std::logic_error, err );
 
     TEUCHOS_TEST_FOR_EXCEPTION(
       isLocallyIndexed () && k_rowPtrs_.dimension_0 () != 0 &&
-      (static_cast<size_t> (k_rowPtrs_.dimension_0 ()) != getNodeNumRows () + 1 ||
-       k_rowPtrs_(getNodeNumRows ()) != static_cast<size_t> (k_lclInds1D_.dimension_0 ())),
+      (static_cast<size_t> (k_rowPtrs_.dimension_0 ()) !=
+       static_cast<size_t> (getNodeNumRows () + 1) ||
+       static_cast<size_t> (k_rowPtrs_(getNodeNumRows ())) !=
+       static_cast<size_t> (k_lclInds1D_.dimension_0 ())),
       std::logic_error, err );
 
     // If profile is dynamic and indices are allocated, then 2-D
@@ -4014,8 +4021,8 @@ namespace Tpetra {
         << h_ptrs.dimension_0 () << " != (lclNumRows+1) = "
         << (lclNumRows+1) << ".");
       // FIXME (mfh 08 Aug 2014) This assumes UVM.
-      TEUCHOS_TEST_FOR_EXCEPTION(
-        k_ptrs(lclNumRows) != lclTotalNumEntries, std::logic_error,
+      TEUCHOS_TEST_FOR_EXCEPTION
+        (static_cast<size_t> (k_ptrs(lclNumRows)) != lclTotalNumEntries, std::logic_error,
         "Tpetra::CrsGraph::fillLocalGraph: In DynamicProfile branch, after "
         "packing k_ptrs, k_ptrs(lclNumRows = " << lclNumRows << ") = " <<
         k_ptrs(lclNumRows) << " != total number of entries on the calling "
@@ -4065,7 +4072,8 @@ namespace Tpetra {
         // FIXME (mfh 08 Aug 2014) This relies on UVM.
         TEUCHOS_TEST_FOR_EXCEPTION(
           numOffsets != 0 &&
-          k_lclInds1D_.dimension_0 () != k_rowPtrs_(numOffsets-1),
+          static_cast<size_t> (k_lclInds1D_.dimension_0 ()) !=
+          static_cast<size_t> (k_rowPtrs_(numOffsets-1)),
           std::logic_error, "Tpetra::CrsGraph::fillLocalGraph: "
           "numOffsets = " << numOffsets << " != 0 and "
           "k_lclInds1D_.dimension_0() = " << k_lclInds1D_.dimension_0 ()
@@ -4091,8 +4099,9 @@ namespace Tpetra {
         if (k_rowPtrs_.dimension_0 () != 0) {
           const size_t numOffsets =
             static_cast<size_t> (k_rowPtrs_.dimension_0 ());
-          TEUCHOS_TEST_FOR_EXCEPTION(
-            k_rowPtrs_(numOffsets-1) != static_cast<size_t> (k_lclInds1D_.dimension_0 ()),
+          TEUCHOS_TEST_FOR_EXCEPTION
+            (static_cast<size_t> (k_rowPtrs_(numOffsets-1)) !=
+             static_cast<size_t> (k_lclInds1D_.dimension_0 ()),
             std::logic_error, "Tpetra::CrsGraph::fillLocalGraph: "
             "In StaticProfile branch, before allocating or packing, "
             "k_rowPtrs_(" << (numOffsets-1) << ") = "
@@ -4135,8 +4144,9 @@ namespace Tpetra {
           "k_ptrs.dimension_0() = " << k_ptrs.dimension_0 () << " != "
           "lclNumRows+1 = " << (lclNumRows+1) << ".");
         // FIXME (mfh 08 Aug 2014) This assumes UVM.
-        TEUCHOS_TEST_FOR_EXCEPTION(
-          k_ptrs(lclNumRows) != lclTotalNumEntries, std::logic_error,
+        TEUCHOS_TEST_FOR_EXCEPTION
+          (static_cast<size_t> (k_ptrs(lclNumRows)) !=
+           static_cast<size_t> (lclTotalNumEntries), std::logic_error,
           "Tpetra::CrsGraph::fillLocalGraph: In StaticProfile unpacked "
           "branch, after filling k_ptrs, k_ptrs(lclNumRows=" << lclNumRows
           << ") = " << k_ptrs(lclNumRows) << " != total number of entries on "

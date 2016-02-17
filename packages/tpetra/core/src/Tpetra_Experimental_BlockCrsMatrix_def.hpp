@@ -1270,7 +1270,7 @@ namespace Experimental {
   BlockCrsMatrix<Scalar, LO, GO, Node>::
   getConstLocalBlockFromAbsOffset (const size_t absBlockOffset) const
   {
-    if (absBlockOffset >= ptr_[rowMeshMap_.getNodeNumElements ()]) {
+    if (absBlockOffset >= static_cast<size_t> (ptr_[rowMeshMap_.getNodeNumElements ()])) {
       // An empty block signifies an error.  We don't expect to see
       // this error in correct code, but it's helpful for avoiding
       // memory corruption in case there is a bug.
@@ -1313,7 +1313,7 @@ namespace Experimental {
   BlockCrsMatrix<Scalar, LO, GO, Node>::
   getNonConstLocalBlockFromAbsOffset (const size_t absBlockOffset) const
   {
-    if (absBlockOffset >= ptr_[rowMeshMap_.getNodeNumElements ()]) {
+    if (absBlockOffset >= static_cast<size_t> (ptr_[rowMeshMap_.getNodeNumElements ()])) {
       // An empty block signifies an error.  We don't expect to see
       // this error in correct code, but it's helpful for avoiding
       // memory corruption in case there is a bug.
@@ -1330,7 +1330,7 @@ namespace Experimental {
   BlockCrsMatrix<Scalar, LO, GO, Node>::
   getLocalBlock (const LO localRowInd, const LO localColInd) const
   {
-    const size_t absRowBlockOffset = ptr_[localRowInd];
+    const size_t absRowBlockOffset = static_cast<size_t> (ptr_[localRowInd]);
     const LO relBlockOffset =
       this->findRelOffsetOfColumnIndex (localRowInd, localColInd);
 
