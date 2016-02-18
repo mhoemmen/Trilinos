@@ -51,8 +51,9 @@
 #ifndef KOKKOS_SPARSE_CRSMATRIX_HPP_
 #define KOKKOS_SPARSE_CRSMATRIX_HPP_
 
-#include <Kokkos_Core.hpp>
-#include <Kokkos_StaticCrsGraph.hpp>
+#include "TpetraKernels_config.h"
+#include "Kokkos_Core.hpp"
+#include "Kokkos_StaticCrsGraph.hpp"
 #include <sstream>
 #include <stdexcept>
 
@@ -363,7 +364,7 @@ template<class ScalarType,
          class OrdinalType,
          class Device,
          class MemoryTraits = void,
-         class SizeType = typename Kokkos::ViewTraits<OrdinalType*, Device, void, void>::size_type>
+         class SizeType = typename Kokkos::StaticCrsGraph<OrdinalType, Kokkos::LayoutLeft, typename Device::execution_space>::size_type>
 class CrsMatrix {
 private:
   typedef typename Kokkos::ViewTraits<ScalarType*,Device,void,void>::host_mirror_space host_mirror_space ;
@@ -387,7 +388,7 @@ public:
   typedef SizeType size_type;
 
   //! Type of a host-memory mirror of the sparse matrix.
-  typedef CrsMatrix<ScalarType, OrdinalType, host_mirror_space, MemoryTraits> HostMirror;
+  typedef CrsMatrix<ScalarType, OrdinalType, host_mirror_space, MemoryTraits, SizeType> HostMirror;
   //! Type of the graph structure of the sparse matrix.
   typedef Kokkos::StaticCrsGraph<OrdinalType, Kokkos::LayoutLeft, execution_space, SizeType> StaticCrsGraphType;
   //! Type of column indices in the sparse matrix.

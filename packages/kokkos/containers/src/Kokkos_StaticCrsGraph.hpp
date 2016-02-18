@@ -1,13 +1,13 @@
 /*
 //@HEADER
 // ************************************************************************
-// 
+//
 //                        Kokkos v. 2.0
 //              Copyright (2014) Sandia Corporation
-// 
+//
 // Under the terms of Contract DE-AC04-94AL85000 with Sandia Corporation,
 // the U.S. Government retains certain rights in this software.
-// 
+//
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -36,7 +36,7 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
 // Questions? Contact  H. Carter Edwards (hcedwar@sandia.gov)
-// 
+//
 // ************************************************************************
 //@HEADER
 */
@@ -50,6 +50,21 @@
 #include <Kokkos_Core.hpp>
 
 namespace Kokkos {
+
+namespace { // (anonymous)
+  template<class DataType, class Arg1Type, class Arg2Type>
+  struct GetDefaultSizeType {
+    typedef ViewTraits<DataType*, Arg1Type, Arg2Type, void> traits_type;
+    typedef typename traits_type::device_type::memory_space::size_type size_type;
+
+    static const bool canUse = std::is_integral<std::decay<DataType> >::value;
+
+    typedef typename Kokkos::Impl::if_c<canUse,
+                                        typename std::decay<DataType>::type,
+                                        size_type>::type type;
+  };
+
+} // namespace (anonymous)
 
 /// \class StaticCrsGraph
 /// \brief Compressed row storage array.
@@ -84,8 +99,11 @@ namespace Kokkos {
 template< class DataType,
           class Arg1Type,
           class Arg2Type = void,
-          typename SizeType = typename ViewTraits<DataType*, Arg1Type, Arg2Type, void >::size_type>
+          typename SizeType = typename GetDefaultSizeType<DataType, Arg1Type, Arg2Type>::type>
 class StaticCrsGraph {
+  static_assert (std::is_integral<SizeType>::value, "SizeType must be an integer.");
+  static_assert (! std::is_pointer<SizeType>::value, "SizeType must not be a pointer.");
+
 private:
   typedef ViewTraits<DataType*, Arg1Type, Arg2Type, void> traits;
 

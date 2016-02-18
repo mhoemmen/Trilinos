@@ -65,7 +65,7 @@ namespace { // anonymous
   // \param whichMatrix [in] The index of the matrix to create.
   template<typename MemorySpace>
   void
-  makeSparseMatrix (Kokkos::View<typename MemorySpace::size_type*, MemorySpace>& ptr,
+  makeSparseMatrix (Kokkos::View<typename KokkosSparse::CrsMatrix<double, int, MemorySpace>::size_type*, MemorySpace>& ptr,
                     Kokkos::View<int*, MemorySpace>& ind,
                     Kokkos::View<double*, MemorySpace>& val,
                     int& numRows,
@@ -76,7 +76,7 @@ namespace { // anonymous
     using Kokkos::HostSpace;
     using Kokkos::MemoryUnmanaged;
     using Kokkos::View;
-    typedef typename MemorySpace::size_type size_type;
+    typedef typename KokkosSparse::CrsMatrix<double, int, MemorySpace>::size_type size_type;
 
     if (whichMatrix == 0) {
       numRows = 10;
@@ -130,12 +130,14 @@ namespace { // anonymous
     }
   }
 
-  // Return the Kokkos::CrsMatrix corresponding to makeSparseMatrix().
+  // Return the KokkosSparse::CrsMatrix corresponding to makeSparseMatrix().
   template<typename MemorySpace>
-  Kokkos::CrsMatrix<double, int, MemorySpace>
+  KokkosSparse::CrsMatrix<double, int, MemorySpace>
   makeCrsMatrix ()
   {
-    Kokkos::View<typename MemorySpace::size_type*, MemorySpace> ptr;
+    typedef KokkosSparse::CrsMatrix<double, int, MemorySpace> crs_matrix_type;
+
+    Kokkos::View<typename crs_matrix_type::size_type*, MemorySpace> ptr;
     Kokkos::View<int*, MemorySpace> ind;
     Kokkos::View<double*, MemorySpace> val;
     int numRows;
@@ -144,11 +146,11 @@ namespace { // anonymous
 
     const int whichMatrix = 0;
     makeSparseMatrix<MemorySpace> (ptr, ind, val, numRows, numCols, nnz, whichMatrix);
-    typedef Kokkos::CrsMatrix<double, int, MemorySpace> crs_matrix_type;
+
     return crs_matrix_type ("A", numRows, numCols, nnz, val, ptr, ind);
   }
 
-  // Create a Kokkos::CrsMatrix.  This mainly tests that the class
+  // Create a KokkosSparse::CrsMatrix.  This mainly tests that the class
   // compiles.  However, it does need to initialize the MemorySpace's
   // default execution space, because it allocates Views and calls
   // deep_copy a few times.
@@ -158,7 +160,7 @@ namespace { // anonymous
   {
     Kokkos::initialize();
 
-    typedef Kokkos::CrsMatrix<double, int, MemorySpace> crs_matrix_type;
+    typedef KokkosSparse::CrsMatrix<double, int, MemorySpace> crs_matrix_type;
     crs_matrix_type A = makeCrsMatrix<MemorySpace> ();
     // mfh 28 Sep 2013: Use A in some way, so the compiler can't
     // optimize it away completely.  This forces the compiler to
