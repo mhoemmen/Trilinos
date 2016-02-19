@@ -61,6 +61,10 @@
 #include <type_traits>
 #endif // KOKKOS_HAVE_CXX11
 
+#ifdef HAVE_TPETRAKERNELS_MKL
+#include "mkl.h"
+#endif // HAVE_TPETRAKERNELS_MKL
+
 
 namespace KokkosSparse {
 
@@ -415,6 +419,11 @@ public:
   cusparseMatDescr_t cusparse_descr;
 #endif // KOKKOS_USE_CUSPARSE
 
+#ifdef HAVE_TPETRAKERNELS_MKL
+  sparse_matrix_t mklHandle;
+  bool mklHandleReady;
+#endif // HAVE_TPETRAKERNELS_MKL
+
   /// \name Storage of the actual sparsity structure and values.
   ///
   /// CrsMatrix uses the compressed sparse row (CSR) storage format to
@@ -441,6 +450,9 @@ public:
   /// the graph, not the matrix.  Then CrsMatrix needs methods to get
   /// these from the graph.
   CrsMatrix () :
+#ifdef HAVE_TPETRAKERNELS_MKL
+    mklHandleReady (false),
+#endif // HAVE_TPETRAKERNELS_MKL
     numCols_ (0)
   {}
 
@@ -448,16 +460,20 @@ public:
   template<typename SType,
            typename OType,
            class DType,
-           class MTType,
+            class MTType,
            typename IType>
   CrsMatrix (const CrsMatrix<SType,OType,DType,MTType,IType> & B) :
-    graph (B.graph),
-    values (B.values),
-    dev_config (B.dev_config),
 #ifdef KOKKOS_USE_CUSPARSE
     cusparse_handle (B.cusparse_handle),
     cusparse_descr (B.cusparse_descr),
 #endif // KOKKOS_USE_CUSPARSE
+#ifdef HAVE_TPETRAKERNELS_MKL
+    mklHandle (B.mklHandle),
+    mklHandleReady (B.mklHandleReady),
+#endif // HAVE_TPETRAKERNELS_MKL
+    graph (B.graph),
+    values (B.values),
+    dev_config (B.dev_config),
     numCols_ (B.numCols ())
   {}
 
@@ -468,6 +484,9 @@ public:
              const StaticCrsGraphType& arg_graph) :
     graph (arg_graph),
     values (arg_label, arg_graph.entries.dimension_0 ()),
+#ifdef HAVE_TPETRAKERNELS_MKL
+    mklHandleReady (false),
+#endif // HAVE_TPETRAKERNELS_MKL
     numCols_ (maximum_entry (arg_graph) + 1)
   {}
 
@@ -502,7 +521,10 @@ public:
              ScalarType* val,
              OrdinalType* rows,
              OrdinalType* cols,
-             bool pad = false)
+             bool pad = false) :
+#ifdef HAVE_TPETRAKERNELS_MKL
+    mklHandleReady (false)
+#endif // HAVE_TPETRAKERNELS_MKL
   {
     (void) pad;
     import (label, nrows, ncols, annz, val, rows, cols);
@@ -543,6 +565,9 @@ public:
              const values_type& vals,
              const row_map_type& rows,
              const index_type& cols) :
+#ifdef HAVE_TPETRAKERNELS_MKL
+    mklHandleReady (false),
+#endif // HAVE_TPETRAKERNELS_MKL
     graph (cols, rows),
     values (vals),
     numCols_ (ncols)
@@ -586,6 +611,9 @@ public:
              const OrdinalType& ncols,
              const values_type& vals,
              const StaticCrsGraphType& graph_) :
+#ifdef HAVE_TPETRAKERNELS_MKL
+    mklHandleReady (false),
+#endif // HAVE_TPETRAKERNELS_MKL
     graph (graph_),
     values (vals),
     numCols_ (ncols)
@@ -725,6 +753,114 @@ public:
 private:
   ordinal_type numCols_;
 };
+
+
+#ifdef HAVE_TPETRAKERNELS_MKL
+  template<class ScalarType,
+           class OrdinalType,
+           class DeviceType,
+           class MemoryTraits = void,
+           class SizeType =
+             typename Kokkos::StaticCrsGraph<OrdinalType,
+                                             Kokkos::LayoutLeft,
+                                             typename DeviceType::execution_space>::size_type>
+  struct MklInspectorExecutorSetup {
+    typedef CrsMatrix<ScalarType, OrdinalType, DeviceType, MemoryTraits, SizeType>
+      kokkos_matrix_type;
+
+    // Return true if successful, else false.  If false, the handle is
+    // invalid; don't use MKL inspector-executor interface for this
+    // matrix.
+    static bool
+    create (sparse_matrix_t& /* handle */, const kokkos_matrix_type& /* A */)
+    {
+      return false;
+    }
+
+    static bool
+    destroy (sparse_matrix_t /* handle */)
+    {
+      return false;
+    }
+
+  };
+
+  template<class MemoryTraits>
+  struct MklInspectorExecutorSetup<double, MKL_INT,
+                                   Kokkos::Device<Kokkos::OpenMP, Kokkos::HostSpace>,
+                                   MemoryTraits, MKL_INT> {
+    typedef Kokkos::Device<Kokkos::OpenMP, Kokkos::HostSpace> device_type;
+    typedef CrsMatrix<double, MKL_INT, device_type, MemoryTraits, MKL_INT> kokkos_matrix_type;
+
+    // Return true if successful, else false.  If false, the handle is
+    // invalid; don't use MKL inspector-executor interface for this
+    // matrix.
+    static bool
+    create (sparse_matrix_t& handle, const kokkos_matrix_type& A)
+    {
+      const MKL_INT numRows = A.numRows ();
+      const MKL_INT numCols = A.numCols ();
+      if (numRows == 0 || A.graph.row_map.dimension_0 () == 0) {
+        return false;
+      }
+
+      MKL_INT* ptrBeg = A.graph.row_map.ptr_on_device ();
+      MKL_INT* ptrEnd = ptrBeg + 1;
+      MKL_INT* ind = A.graph.entries.ptr_on_device ();
+      double* val = A.values.ptr_on_device ();
+      sparse_status_t status =
+        mkl_sparse_d_create_csr (&handle, SPARSE_INDEX_BASE_ZERO,
+                                 numRows, numCols, ptrBeg, ptrEnd, ind, val);
+      if (status != SPARSE_STATUS_SUCCESS) {
+        return false;
+      }
+      // FIXME (mfh 18 Feb 2016) Let the user pass in a hint here.
+      const MKL_INT expectedNumCalls = 50;
+      sparse_operation_t op = SPARSE_OPERATION_NON_TRANSPOSE;
+      matrix_descr desc;
+      desc.type = SPARSE_MATRIX_TYPE_GENERAL;
+      desc.mode = SPARSE_FILL_MODE_LOWER; // not actually used
+      desc.diag = SPARSE_DIAG_NON_UNIT;
+      status = mkl_sparse_set_mv_hint (handle, op, desc, expectedNumCalls);
+
+      if (status != SPARSE_STATUS_SUCCESS) {
+        // If the above operation fails, do our best to free the handle.
+        (void) destroy (handle);
+        return false;
+      }
+
+      // SPARSE_MEMORY_NONE only allows allocations proportional to
+      // std::max(numRows, numCols).  SPARSE_MEMORY_AGGRESSIVE allows
+      // allocations proportional to the number of stored entries in
+      // the matrix.
+      sparse_memory_usage_t policy = SPARSE_MEMORY_NONE;
+      status = mkl_sparse_set_memory_hint (handle, policy);
+      if (status != SPARSE_STATUS_SUCCESS) {
+        // If the above operation fails, do our best to free the handle.
+        (void) destroy (handle);
+        return false;
+      }
+
+      // Actually do the analysis and optimize the data structure.
+      status = mkl_sparse_optimize (handle);
+      if (status != SPARSE_STATUS_SUCCESS) {
+        // If the above operation fails, do our best to free the handle.
+        (void) destroy (handle);
+        return false;
+      }
+
+      return true;
+    }
+
+    static bool
+    destroy (sparse_matrix_t handle)
+    {
+      sparse_status_t status = mkl_sparse_destroy (handle);
+      return status == SPARSE_STATUS_SUCCESS;
+    }
+  };
+#endif // HAVE_TPETRAKERNELS_MKL
+
 
 //----------------------------------------------------------------------------
 //----------------------------------------------------------------------------

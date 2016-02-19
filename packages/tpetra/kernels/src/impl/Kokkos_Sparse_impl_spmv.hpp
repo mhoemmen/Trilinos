@@ -85,6 +85,14 @@ namespace { // (anonymous)
             const ValueType& beta,
             const y_vec_type& y)
     {
+      std::ostringstream os;
+      os << "@@@ NOT A SUPPORTED MATRIX TYPE for MKL: ValueType = " <<
+        typeid (ValueType).name () << ", IndexType = " <<
+        typeid (IndexType).name () << ", OffsetType = " <<
+        typeid (OffsetType).name () << ", DeviceType = " <<
+        typeid (DeviceType).name ();
+      std::cerr << os.str () << std::endl;
+
       // Default is not to use MKL, because MKL only supports certain types.
       return false;
     }
@@ -146,32 +154,63 @@ namespace { // (anonymous)
       }
 
       if (! useMkl) {
+        std::cerr << "### Could use MKL, but TPETRA_USE_MKL_SPMV is not "
+          "defined or not true ###" << std::endl;
         return false;
       }
       else { // useMkl
-        const char* mklMode = (mode[0] == 'H' || mode[0] == 'h') ? "C" : mode;
-        const MKL_INT numRows = A.numRows ();
-        // If numRows == 0, then the ptr array may be empty (instead of
-        // having one entry as it should).  Don't try to access ptr[1]
-        // in that case.
-        if (numRows > 0) {
-          char matdesc[4];
-          matdesc[0] = 'G';
-          matdesc[1] = 'N'; // neither upper nor lower tri (mat-vec ignores this)
-          matdesc[2] = 'N'; // explicitly stored diagonal
-          matdesc[3] = 'C'; // zero-based (C style) indexing
+        if (A.mklHandleReady) {
+          matrix_descr desc;
+          desc.type = SPARSE_MATRIX_TYPE_GENERAL;
+          desc.mode = SPARSE_FILL_MODE_LOWER; // not actually used
+          desc.diag = SPARSE_DIAG_NON_UNIT;
 
-          auto rowBeg = A.graph.row_map;
-          const std::pair<size_t, size_t> range (1, A.graph.row_map.dimension_0 ());
-          auto rowEnd = Kokkos::subview (A.graph.row_map, range);
-          const MKL_INT numCols = A.numCols ();
-          mkl_dcsrmv (mklMode, &numRows, &numCols, &alpha, matdesc,
-                      A.values.ptr_on_device (),
-                      A.graph.entries.ptr_on_device (),
-                      rowBeg.ptr_on_device (), rowEnd.ptr_on_device (),
-                      x.ptr_on_device (), &beta, y.ptr_on_device ());
+          sparse_operation_t transA = SPARSE_OPERATION_NON_TRANSPOSE;
+          if (mode[0] == 'T' || mode[0] == 't') {
+            transA = SPARSE_OPERATION_TRANSPOSE;
+          }
+          else if (mode[0] == 'H' || mode[0] == 'h' ||
+                   mode[0] == 'C' || mode[0] == 'C') {
+            transA = SPARSE_OPERATION_CONJUGATE_TRANSPOSE;
+          }
+          sparse_status_t status =
+            mkl_sparse_d_mv (transA, alpha, A.mklHandle, desc,
+                             x.ptr_on_device (), beta, y.ptr_on_device ());
+          if (status == SPARSE_STATUS_SUCCESS) {
+            std::cerr << ":D:D:D YAY called mkl_sparse_k_mv :D:D:D" << std::endl;
+            return true; // successfully used inspector-executor interface
+          }
+          else {
+            // If it didn't work, we really want to know.
+            throw std::logic_error ("FAILED to use MKL inspector-executor sparse mat-vec");
+          }
         }
-        return true; // successfully used MKL
+        else {
+          const char* mklMode = (mode[0] == 'H' || mode[0] == 'h') ? "C" : mode;
+          const MKL_INT numRows = A.numRows ();
+          // If numRows == 0, then the ptr array may be empty (instead of
+          // having one entry as it should).  Don't try to access ptr[1]
+          // in that case.
+          if (numRows > 0) {
+            char matdesc[4];
+            matdesc[0] = 'G';
+            matdesc[1] = 'N'; // neither upper nor lower tri (mat-vec ignores this)
+            matdesc[2] = 'N'; // explicitly stored diagonal
+            matdesc[3] = 'C'; // zero-based (C style) indexing
+
+            auto rowBeg = A.graph.row_map;
+            const std::pair<size_t, size_t> range (1, A.graph.row_map.dimension_0 ());
+            auto rowEnd = Kokkos::subview (A.graph.row_map, range);
+            const MKL_INT numCols = A.numCols ();
+            std::cerr << "YAY called mkl_dcsrmv" << std::endl;
+            mkl_dcsrmv (mklMode, &numRows, &numCols, &alpha, matdesc,
+                        A.values.ptr_on_device (),
+                        A.graph.entries.ptr_on_device (),
+                        rowBeg.ptr_on_device (), rowEnd.ptr_on_device (),
+                        x.ptr_on_device (), &beta, y.ptr_on_device ());
+          }
+          return true; // successfully used MKL
+        }
       }
     }
   };
@@ -659,8 +698,18 @@ struct SPMV
   spmv (const char mode[], const Scalar& alpha, const AMatrix& A,
         const XVector& x, const Scalar& beta, const YVector& y)
   {
-    typedef TryMklOneVec<Scalar, AO, AS, AD> try_mkl_type;
+    typedef typename std::decay<typename AMatrix::size_type>::type offset_type;
+    typedef typename std::decay<typename AMatrix::ordinal_type>::type ordinal_type;
+    typedef typename AMatrix::device_type device_type;
+    typedef TryMklOneVec<Scalar, ordinal_type, offset_type, device_type> try_mkl_type;
     const bool didMkl = try_mkl_type::tryMkl (mode, alpha, A, x, beta, y);
+
+    if (didMkl) {
+      std::cerr << "MKL did its thing" << std::endl;
+    }
+    else {
+      std::cerr << ">>> NO MKL <<<" << std::endl;
+    }
 
     if (! didMkl) {
       if (alpha == Kokkos::Details::ArithTraits<Scalar>::zero ()) {
@@ -807,8 +856,18 @@ SPMV<const SCALAR_TYPE, \
 spmv (const char mode[], const Scalar& alpha, const AMatrix& A, \
       const XVector& x, const Scalar& beta, const YVector& y) \
 { \
-  typedef TryMklOneVec<SCALAR_TYPE, ORDINAL_TYPE, OFFSET_TYPE, Kokkos::Device<EXEC_SPACE_TYPE, MEM_SPACE_TYPE> > try_mkl_type; \
+  typedef typename std::decay<typename AMatrix::size_type>::type offset_type; \
+  typedef typename std::decay<typename AMatrix::ordinal_type>::type ordinal_type; \
+  typedef typename AMatrix::device_type device_type; \
+  typedef TryMklOneVec<Scalar, ordinal_type, offset_type, device_type> try_mkl_type; \
   const bool didMkl = try_mkl_type::tryMkl (mode, alpha, A, x, beta, y); \
+  \
+  if (didMkl) { \
+    std::cerr << "MKL did its thing" << std::endl; \
+  } \
+  else { \
+    std::cerr << ">>> NO MKL <<<" << std::endl; \
+  } \
   \
   if (! didMkl) { \
     if (alpha == Kokkos::Details::ArithTraits<Scalar>::zero ()) { \

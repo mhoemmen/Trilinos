@@ -59,6 +59,11 @@
 #include "Teuchos_ArrayRCP.hpp"
 #include <typeinfo>
 
+#ifdef HAVE_TPETRAKERNELS_MKL
+#include <cstdlib> // getenv
+#include <cstring> // strncmp
+#endif // HAVE_TPETRAKERNELS_MKL
+
 // CrsMatrix relies on template methods implemented in Tpetra_CrsGraph_def.hpp
 //
 // FIXME (mfh 01 Oct 2015) If I comment this out, I get link errors
@@ -3835,6 +3840,59 @@ namespace Tpetra {
     // local objects.  We may now release them and their memory, since
     // they will persist in the local sparse ops if necessary.  We
     // keep the local graph if the parameters tell us to do so.
+
+#ifdef HAVE_TPETRAKERNELS_MKL
+    {
+      // WARNING (19 Feb 2016) POSIX does not require getenv() to be
+      // reentrant.  Thus, it might not be safe to call this function
+      // concurrently on multiple threads, even with different data on
+      // different threads.  As a result, it's OK for us to make this
+      // function nonreentrant, so that we can avoid the overhead of
+      // calling getenv after the first call.
+      static bool notFirstCall = false;
+      static bool useMIE = false;
+
+      if (! notFirstCall) {
+        const char envKey[] = "TPETRA_USE_MKL_IE";
+        const char* const envVal = getenv (envKey);
+        if (envVal == NULL) {
+          useMIE = false;
+        }
+        else {
+          if (strncmp (envVal, "1", 1) ||
+              strncmp (envVal, "ON", 2) ||
+              strncmp (envVal, "YES", 3) ||
+              strncmp (envVal, "TRUE", 4)) {
+            useMIE = true;
+          }
+          else {
+            useMIE = false;
+          }
+        }
+        notFirstCall = true;
+      }
+
+      if (useMIE) {
+        typedef KokkosSparse::MklInspectorExecutorSetup<impl_scalar_type,
+          local_ordinal_type, device_type,
+          typename local_matrix_type::memory_traits,
+          typename local_matrix_type::size_type> setup_type;
+
+        bool success = true;
+        if (lclMatrix_.mklHandleReady) {
+          // This means that fillComplete has been called before.
+          success = setup_type::destroy (lclMatrix_.mklHandle);
+          lclMatrix_.mklHandleReady = false;
+        }
+        if (success) {
+          success = setup_type::create (lclMatrix_.mklHandle, lclMatrix_);
+          if (success) {
+            lclMatrix_.mklHandleReady = true;
+          }
+        }
+      }
+    }
+#endif // HAVE_TPETRAKERNELS_MKL
 
     // FIXME (mfh 28 Aug 2014) "Preserve Local Graph" bool parameter no longer used.
 
