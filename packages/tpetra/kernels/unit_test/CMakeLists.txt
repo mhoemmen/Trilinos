@@ -136,9 +136,28 @@ TRIBITS_ADD_EXECUTABLE_AND_TEST(
 
 # This test needs to be able to control when Kokkos gets initialized,
 # so it can't use the Teuchos unit test "main" .cpp file.
+#
+# This test works (builds and passes) even if the MKL TPL is not
+# enabled.  Nevertheless, it is more useful if the MKL TPL _is_
+# enabled.
 TRIBITS_ADD_EXECUTABLE_AND_TEST(
   MKL_sparseMatrixHandle
   SOURCES MKL_sparseMatrixHandle.cpp
   COMM serial mpi
   NUM_MPI_PROCS 1
   )
+
+#
+# This test only builds and passes if the MKL TPL is enabled.
+#
+ASSERT_DEFINED (${PACKAGE_NAME}_ENABLE_MKL)
+IF (${PACKAGE_NAME}_ENABLE_MKL)
+  # This test needs to be able to control when Kokkos gets initialized,
+  # so it can't use the Teuchos unit test "main" .cpp file.
+  TRIBITS_ADD_EXECUTABLE_AND_TEST(
+    MKL_TRSM
+    SOURCES MKL_TRSM.cpp
+    COMM serial mpi
+    NUM_MPI_PROCS 1
+    )
+ENDIF ()
