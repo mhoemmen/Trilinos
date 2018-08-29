@@ -60,7 +60,8 @@ namespace Classes {
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
 // Forward declaration of CrsGraph.
-template <class LO, class GO, class N> class CrsGraph;
+template <class LO, class GO, class NT>
+class CrsGraph;
 #endif // DOXYGEN_SHOULD_SKIP_THIS
 
 } // namespace Classes

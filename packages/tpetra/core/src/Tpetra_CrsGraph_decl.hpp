@@ -253,9 +253,9 @@ namespace Classes {
   /// stored in the local graph and communicated to the appropriate
   /// node on the next call to globalAssemble() or fillComplete() (the
   /// latter calls the former).
-  template <class LocalOrdinal = ::Tpetra::Details::DefaultTypes::local_ordinal_type,
-            class GlobalOrdinal = ::Tpetra::Details::DefaultTypes::global_ordinal_type,
-            class Node = ::Tpetra::Details::DefaultTypes::node_type>
+  template <class LocalOrdinal,
+            class GlobalOrdinal,
+            class Node>
   class CrsGraph :
     public RowGraph<LocalOrdinal, GlobalOrdinal, Node>,
     public DistObject<GlobalOrdinal,
