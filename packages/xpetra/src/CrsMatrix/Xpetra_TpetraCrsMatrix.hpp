@@ -290,9 +290,9 @@ namespace Xpetra {
     void getAllValues(ArrayRCP<const size_t>& rowptr, ArrayRCP<const LocalOrdinal>& colind, ArrayRCP<const Scalar>& values) const
     { XPETRA_MONITOR("TpetraCrsMatrix::getAllValues"); mtx_->getAllValues(rowptr,colind,values); }
 
-    bool haveGlobalConstants() const 
+    bool haveGlobalConstants() const
     { return mtx_->haveGlobalConstants();}
-    
+
 //@}
 
     //! @name Transformational Methods
@@ -350,7 +350,7 @@ namespace Xpetra {
     const RCP< const Map< LocalOrdinal, GlobalOrdinal, Node > >  getColMap() const { XPETRA_MONITOR("TpetraCrsMatrix::getColMap"); return toXpetra(mtx_->getColMap()); }
 
     //! Returns the CrsGraph associated with this matrix.
-    RCP< const CrsGraph< LocalOrdinal, GlobalOrdinal, Node > > getCrsGraph() const { XPETRA_MONITOR("TpetraCrsMatrix::getCrsGraph"); return toXpetra(mtx_->getCrsGraph()); }
+    RCP< const CrsGraph< LocalOrdinal, GlobalOrdinal, Node > > getCrsGraph() const { XPETRA_MONITOR("TpetraCrsMatrix::getCrsGraph"); return toXpetra<LocalOrdinal, GlobalOrdinal, Node>(mtx_->getCrsGraph()); }
 
     //! Number of global elements in the row map of this matrix.
     global_size_t getGlobalNumRows() const { XPETRA_MONITOR("TpetraCrsMatrix::getGlobalNumRows"); return mtx_->getGlobalNumRows(); }
@@ -757,7 +757,7 @@ namespace Xpetra {
     void getAllValues(ArrayRCP<const size_t>& rowptr, ArrayRCP<const LocalOrdinal>& colind, ArrayRCP<const Scalar>& values) const {  }
 
     bool haveGlobalConstants() const  { return false;}
-    
+
 
     //@}
 

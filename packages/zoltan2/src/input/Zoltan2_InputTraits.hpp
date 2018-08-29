@@ -134,8 +134,8 @@ typedef Tpetra::Map<>::node_type default_node_t;
     \li \c gno (global number) is the integral data type used by the application and Zoltan2 to represent global identifiers and global counts.
  */
 
-template <typename scalar=double, 
-          typename lno=Tpetra::Map<>::local_ordinal_type, 
+template <typename scalar=double,
+          typename lno=Tpetra::Map<>::local_ordinal_type,
           typename gno=Tpetra::Map<>::global_ordinal_type>
 class BasicUserTypes{
 };
@@ -372,17 +372,22 @@ struct InputTraits<Xpetra::CrsGraph<LocalOrdinal,GlobalOrdinal,Node> >
   Z2_STATIC_ASSERT_TYPES // validate the types
 };
 
-template <typename LocalOrdinal,
-          typename GlobalOrdinal,
-          typename Node>
-struct InputTraits<Tpetra::CrsGraph<LocalOrdinal,GlobalOrdinal,Node> >
+// FIXME (mfh 29 Aug 2018) I haven't quite figured out how to make
+// this work with just "Tpetra::CrsGraph<LO, GO, NT>" as the argument
+// to InputTraits yet.  Please don't ever use anything in the
+// Tpetra::Classes namespace in your own code.  If you use
+// "Tpetra::CrsGraph<LO, GO, NT>" as the argument of InputTraits,
+// you'll get an error of the form "template parameters not deducible
+// in partial specialization."
+template <class LO, class GO, class NT>
+struct InputTraits<Tpetra::Classes::CrsGraph<LO, GO, NT> >
 {
   typedef default_scalar_t scalar_t;
-  typedef LocalOrdinal  lno_t;
-  typedef GlobalOrdinal gno_t;
+  typedef typename Tpetra::CrsGraph<LO, GO, NT>::local_ordinal_type  lno_t;
+  typedef typename Tpetra::CrsGraph<LO, GO, NT>::global_ordinal_type gno_t;
   typedef size_t offset_t;
   typedef Zoltan2::default_part_t  part_t;
-  typedef Node          node_t;
+  typedef typename Tpetra::CrsGraph<LO, GO, NT>::node_type node_t;
   static inline std::string name() {return "Tpetra::CrsGraph";}
 
   Z2_STATIC_ASSERT_TYPES // validate the types
