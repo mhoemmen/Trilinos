@@ -910,9 +910,9 @@ packCrsGraphNew(const CrsGraph<LO, GO, NT>& sourceGraph,
 
 template<typename LO, typename GO, typename NT>
 void
-packCrsGraphWithOwningPIDs(const CrsGraph<LO, GO, NT>& sourceGraph,
-                           Kokkos::DualView<typename CrsGraph<LO,GO,NT>::packet_type*,
-                                            typename CrsGraph<LO,GO,NT>::buffer_device_type>&
+packCrsGraphWithOwningPIDs(const ::Tpetra::CrsGraph<LO, GO, NT>& sourceGraph,
+                           Kokkos::DualView<typename ::Tpetra::CrsGraph<LO, GO, NT>::packet_type*,
+                                            typename ::Tpetra::CrsGraph<LO, GO, NT>::buffer_device_type>&
                                             exports_dv,
                            const Teuchos::ArrayView<size_t>& numPacketsPerLID,
                            const Teuchos::ArrayView<const LO>& exportLIDs,
@@ -920,9 +920,9 @@ packCrsGraphWithOwningPIDs(const CrsGraph<LO, GO, NT>& sourceGraph,
                            size_t& constantNumPackets,
                            Distributor& distor)
 {
-  typedef typename CrsGraph<LO,GO,NT>::local_graph_type local_graph_type;
-  typedef typename CrsGraph<LO,GO,NT>::packet_type packet_type;
-  typedef typename CrsGraph<LO,GO,NT>::buffer_device_type buffer_device_type;
+  typedef typename ::Tpetra::CrsGraph<LO,GO,NT>::local_graph_type local_graph_type;
+  typedef typename ::Tpetra::CrsGraph<LO,GO,NT>::packet_type packet_type;
+  typedef typename ::Tpetra::CrsGraph<LO,GO,NT>::buffer_device_type buffer_device_type;
   typedef typename Kokkos::DualView<packet_type*, buffer_device_type>::t_host::execution_space host_exec_space;
   typedef Kokkos::Device<host_exec_space, Kokkos::HostSpace> host_dev_type;
 
@@ -986,8 +986,8 @@ packCrsGraphWithOwningPIDs(const CrsGraph<LO, GO, NT>& sourceGraph,
     Distributor&); \
   template void \
   Details::packCrsGraphWithOwningPIDs<LO, GO, NT> ( \
-    const CrsGraph<LO, GO, NT>&, \
-    Kokkos::DualView<CrsGraph<LO,GO,NT>::packet_type*, CrsGraph<LO,GO,NT>::buffer_device_type>&, \
+    const ::Tpetra::CrsGraph<LO, GO, NT>&, \
+    Kokkos::DualView<::Tpetra::CrsGraph<LO, GO, NT>::packet_type*, ::Tpetra::CrsGraph<LO,GO,NT>::buffer_device_type>&, \
     const Teuchos::ArrayView<size_t>&, \
     const Teuchos::ArrayView<const LO>&, \
     const Teuchos::ArrayView<const int>&, \

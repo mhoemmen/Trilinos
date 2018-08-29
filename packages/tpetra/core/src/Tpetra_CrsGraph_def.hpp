@@ -6708,7 +6708,7 @@ namespace Classes {
         getArrayViewFromDualView(destGraph->numExportPacketsPerLID_);
 
       // Pack & Prepare w/ owning PIDs
-      packCrsGraphWithOwningPIDs(*this, destGraph->exports_,
+      packCrsGraphWithOwningPIDs<LO, GO, NT> (*this, destGraph->exports_,
                                  numExportPacketsPerLID, ExportLIDs,
                                  SourcePids, constantNumPackets, Distor);
     }
@@ -6833,7 +6833,7 @@ namespace Classes {
     Teuchos::ArrayView<const packet_type> hostImports =
       getArrayViewFromDualView(destGraph->imports_);
     size_t mynnz =
-      unpackAndCombineWithOwningPIDsCount(*this, RemoteLIDs, hostImports,
+      unpackAndCombineWithOwningPIDsCount<LO, GO, NT> (*this, RemoteLIDs, hostImports,
                                            numImportPacketsPerLID,
                                            constantNumPackets, Distor, INSERT,
                                            NumSameIDs, PermuteToLIDs, PermuteFromLIDs);
@@ -6859,7 +6859,7 @@ namespace Classes {
     // in a huge list of arrays is icky.  Can't we have a bit of an
     // abstraction?  Implementing a concrete DistObject subclass only
     // takes five methods.
-    unpackAndCombineIntoCrsArrays(*this, RemoteLIDs, hostImports,
+    unpackAndCombineIntoCrsArrays<LO, GO, NT> (*this, RemoteLIDs, hostImports,
                                   numImportPacketsPerLID, constantNumPackets,
                                   Distor, INSERT, NumSameIDs, PermuteToLIDs,
                                   PermuteFromLIDs, N, mynnz, MyPID,
@@ -6876,7 +6876,7 @@ namespace Classes {
     // Directory lookups (since the Import object knows who owns all
     // the GIDs).
     Teuchos::Array<int> RemotePids;
-    Import_Util::lowCommunicationMakeColMapAndReindex(CSR_rowptr(),
+    Import_Util::lowCommunicationMakeColMapAndReindex<LO, GO, NT> (CSR_rowptr(),
                                                        CSR_colind_LID(),
                                                        CSR_colind_GID(),
                                                        BaseDomainMap,

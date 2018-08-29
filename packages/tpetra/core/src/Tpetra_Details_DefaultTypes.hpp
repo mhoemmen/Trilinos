@@ -98,6 +98,15 @@ namespace DefaultTypes {
   using node_type = ::Kokkos::Compat::KokkosDeviceWrapperNode<execution_space>;
 } // namespace DefaultTypes
 
+// This is for ThreeArgAlias and FourArgAlias.
+// Please don't use this otherwise.
+struct DefaultTemplateParameters {
+  using scalar_type = ::Tpetra::Details::DefaultTypes::scalar_type;
+  using local_ordinal_type = ::Tpetra::Details::DefaultTypes::local_ordinal_type;
+  using global_ordinal_type = ::Tpetra::Details::DefaultTypes::global_ordinal_type;
+  using node_type = ::Tpetra::Details::DefaultTypes::node_type;
+};
+
 } // namespace Details
 
 } // namespace Tpetra

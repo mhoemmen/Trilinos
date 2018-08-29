@@ -78,7 +78,7 @@ namespace Tpetra {
     public:
       static Teuchos::RCP<OutputCrsGraphType>
       clone (const InputCrsGraphType& graphIn,
-             const Teuchos::RCP<typename OutputCrsGraphType::node_type> nodeOut,
+             const Teuchos::RCP<typename OutputCrsGraphType::node_type>& nodeOut,
              const Teuchos::RCP<Teuchos::ParameterList>& params = Teuchos::null);
     };
   } // namespace Details
@@ -2597,404 +2597,402 @@ namespace Classes {
 
   namespace Details {
 
-    template<class LocalOrdinal,
-             class GlobalOrdinal,
-             class OutputNodeType,
-             class InputNodeType>
-    class CrsGraphCopier<CrsGraph<LocalOrdinal, GlobalOrdinal, OutputNodeType>,
-                         CrsGraph<LocalOrdinal, GlobalOrdinal, InputNodeType> > {
-    public:
-      typedef CrsGraph<LocalOrdinal, GlobalOrdinal, InputNodeType> input_crs_graph_type;
-      typedef CrsGraph<LocalOrdinal, GlobalOrdinal, OutputNodeType> output_crs_graph_type;
+    template<class OutputCrsGraphType,
+             class InputCrsGraphType>
+    Teuchos::RCP<OutputCrsGraphType>
+    CrsGraphCopier<OutputCrsGraphType, InputCrsGraphType>::
+    clone (const InputCrsGraphType& graphIn,
+           const Teuchos::RCP<typename OutputCrsGraphType::node_type>& nodeOut,
+           const Teuchos::RCP<Teuchos::ParameterList>& params)
+    {
+      static_assert (std::is_same<typename OutputCrsGraphType::local_ordinal_type,
+                       typename InputCrsGraphType::local_ordinal_type>::value,
+                     "Both CrsGraph types must have the same local_ordinal_type.");
+      static_assert (std::is_same<typename OutputCrsGraphType::global_ordinal_type,
+                       typename InputCrsGraphType::global_ordinal_type>::value,
+                     "Both CrsGraph types must have the same global_ordinal_type.");
+      using Teuchos::arcp;
+      using Teuchos::Array;
+      using Teuchos::ArrayRCP;
+      using Teuchos::ArrayView;
+      using Teuchos::null;
+      using Teuchos::outArg;
+      using Teuchos::ParameterList;
+      using Teuchos::parameterList;
+      using Teuchos::RCP;
+      using Teuchos::rcp;
+      using Teuchos::REDUCE_MIN;
+      using Teuchos::reduceAll;
+      using Teuchos::sublist;
+      using std::cerr;
+      using std::endl;
+      using LO = typename InputCrsGraphType::local_ordinal_type;
+      using GO = typename InputCrsGraphType::global_ordinal_type;
+      typedef typename ArrayView<const GO>::size_type size_type;
+      typedef ::Tpetra::Map<LO, GO, typename InputCrsGraphType::node_type> input_map_type;
+      typedef ::Tpetra::Map<LO, GO, typename OutputCrsGraphType::node_type> output_map_type;
+      const char prefix[] = "Tpetra::Details::CrsGraphCopier::clone: ";
 
-      static Teuchos::RCP<output_crs_graph_type>
-      clone (const input_crs_graph_type& graphIn,
-             const Teuchos::RCP<OutputNodeType> &nodeOut,
-             const Teuchos::RCP<Teuchos::ParameterList>& params = Teuchos::null)
-      {
-        using Teuchos::arcp;
-        using Teuchos::Array;
-        using Teuchos::ArrayRCP;
-        using Teuchos::ArrayView;
-        using Teuchos::null;
-        using Teuchos::outArg;
-        using Teuchos::ParameterList;
-        using Teuchos::parameterList;
-        using Teuchos::RCP;
-        using Teuchos::rcp;
-        using Teuchos::REDUCE_MIN;
-        using Teuchos::reduceAll;
-        using Teuchos::sublist;
-        using std::cerr;
-        using std::endl;
-        typedef LocalOrdinal LO;
-        typedef GlobalOrdinal GO;
-        typedef typename ArrayView<const GO>::size_type size_type;
-        typedef ::Tpetra::Map<LO, GO, InputNodeType> input_map_type;
-        typedef ::Tpetra::Map<LO, GO, OutputNodeType> output_map_type;
-        const char prefix[] = "Tpetra::Details::CrsGraphCopier::clone: ";
-
-        // Set parameters' default values.
-        bool debug = false;
-        bool fillCompleteClone = true;
-        bool useLocalIndices = graphIn.hasColMap ();
-        ProfileType pftype = StaticProfile;
-        // If the user provided a ParameterList, get values from there.
-        if (! params.is_null ()) {
-          fillCompleteClone = params->get ("fillComplete clone", fillCompleteClone);
-          useLocalIndices = params->get ("Locally indexed clone", useLocalIndices);
-          if (params->get ("Static profile clone", true) == false) {
-            pftype = DynamicProfile;
-          }
-          debug = params->get ("Debug", debug);
+      // Set parameters' default values.
+      bool debug = false;
+      bool fillCompleteClone = true;
+      bool useLocalIndices = graphIn.hasColMap ();
+      ProfileType pftype = StaticProfile;
+      // If the user provided a ParameterList, get values from there.
+      if (! params.is_null ()) {
+        fillCompleteClone = params->get ("fillComplete clone", fillCompleteClone);
+        useLocalIndices = params->get ("Locally indexed clone", useLocalIndices);
+        if (params->get ("Static profile clone", true) == false) {
+          pftype = DynamicProfile;
         }
+        debug = params->get ("Debug", debug);
+      }
 
-        const Teuchos::Comm<int>& comm = * (graphIn.getRowMap ()->getComm ());
-        const int myRank = comm.getRank ();
+      const Teuchos::Comm<int>& comm = * (graphIn.getRowMap ()->getComm ());
+      const int myRank = comm.getRank ();
 
-        TEUCHOS_TEST_FOR_EXCEPTION(
-                                   ! graphIn.hasColMap () && useLocalIndices, std::runtime_error,
-                                   prefix << "You asked clone() to use local indices (by setting the "
-                                   "\"Locally indexed clone\" parameter to true), but the source graph "
-                                   "does not yet have a column Map, so this is impossible.");
+      TEUCHOS_TEST_FOR_EXCEPTION
+        (! graphIn.hasColMap () && useLocalIndices, std::runtime_error,
+         prefix << "You asked clone() to use local indices (by setting the "
+         "\"Locally indexed clone\" parameter to true), but the source graph "
+         "does not yet have a column Map, so this is impossible.");
+
+      if (debug) {
+        std::ostringstream os;
+        os << "Process " << myRank << ": Cloning row Map" << endl;
+        cerr << os.str ();
+      }
+
+      RCP<const output_map_type> clonedRowMap =
+        graphIn.getRowMap ()->template clone<typename OutputCrsGraphType::node_type> (nodeOut);
+
+      // Invoke the output graph's constructor, using the input graph's
+      // upper bounds on the number of entries in each local row.
+      RCP<OutputCrsGraphType> clonedGraph; // returned by this function
+      {
+        ArrayRCP<const size_t> numEntriesPerRow;
+        size_t numEntriesForAll = 0;
+        bool boundSameForAllLocalRows = true;
 
         if (debug) {
           std::ostringstream os;
-          os << "Process " << myRank << ": Cloning row Map" << endl;
+          os << "Process " << myRank << ": Getting per-row bounds" << endl;
+          cerr << os.str ();
+        }
+        graphIn.getNumEntriesPerLocalRowUpperBound (numEntriesPerRow,
+                                                    numEntriesForAll,
+                                                    boundSameForAllLocalRows);
+        if (debug) {
+          std::ostringstream os;
+          os << "Process " << myRank << ": numEntriesForAll = "
+             << numEntriesForAll << endl;
           cerr << os.str ();
         }
 
-        RCP<const output_map_type> clonedRowMap =
-          graphIn.getRowMap ()->template clone<OutputNodeType> (nodeOut);
-
-        // Invoke the output graph's constructor, using the input graph's
-        // upper bounds on the number of entries in each local row.
-        RCP<output_crs_graph_type> clonedGraph; // returned by this function
-        {
-          ArrayRCP<const size_t> numEntriesPerRow;
-          size_t numEntriesForAll = 0;
-          bool boundSameForAllLocalRows = true;
-
-          if (debug) {
-            std::ostringstream os;
-            os << "Process " << myRank << ": Getting per-row bounds" << endl;
-            cerr << os.str ();
-          }
-          graphIn.getNumEntriesPerLocalRowUpperBound (numEntriesPerRow,
-                                                      numEntriesForAll,
-                                                      boundSameForAllLocalRows);
-          if (debug) {
-            std::ostringstream os;
-            os << "Process " << myRank << ": numEntriesForAll = "
-               << numEntriesForAll << endl;
-            cerr << os.str ();
-          }
-
-          if (debug) {
-            std::ostringstream os;
-            os << "Process " << myRank << ": graphIn.getNodeMaxNumRowEntries() = "
-               << graphIn.getNodeMaxNumRowEntries () << endl;
-            cerr << os.str ();
-          }
-
-          RCP<ParameterList> graphparams;
-          if (params.is_null ()) {
-            graphparams = parameterList ("CrsGraph");
-          } else {
-            graphparams = sublist (params, "CrsGraph");
-          }
-          if (useLocalIndices) {
-            RCP<const output_map_type> clonedColMap =
-              graphIn.getColMap ()->template clone<OutputNodeType> (nodeOut);
-            if (boundSameForAllLocalRows) {
-              clonedGraph = rcp (new output_crs_graph_type (clonedRowMap, clonedColMap,
-                                                            numEntriesForAll, pftype,
-                                                            graphparams));
-            } else {
-              clonedGraph = rcp (new output_crs_graph_type (clonedRowMap, clonedColMap,
-                                                            numEntriesPerRow, pftype,
-                                                            graphparams));
-            }
-          } else {
-            if (boundSameForAllLocalRows) {
-              clonedGraph = rcp (new output_crs_graph_type (clonedRowMap,
-                                                            numEntriesForAll, pftype,
-                                                            graphparams));
-            } else {
-              clonedGraph = rcp (new output_crs_graph_type (clonedRowMap,
-                                                            numEntriesPerRow,
-                                                            pftype, graphparams));
-            }
-          }
-
-          if (debug) {
-            std::ostringstream os;
-            os << "Process " << myRank << ": Invoked output graph's constructor" << endl;
-            cerr << os.str ();
-          }
-
-          // done with these
-          numEntriesPerRow = null;
-          numEntriesForAll = 0;
+        if (debug) {
+          std::ostringstream os;
+          os << "Process " << myRank << ": graphIn.getNodeMaxNumRowEntries() = "
+             << graphIn.getNodeMaxNumRowEntries () << endl;
+          cerr << os.str ();
         }
 
-        const input_map_type& inputRowMap = * (graphIn.getRowMap ());
-        const size_type numRows =
-          static_cast<size_type> (inputRowMap.getNodeNumElements ());
-
-        bool failed = false;
-
+        RCP<ParameterList> graphparams;
+        if (params.is_null ()) {
+          graphparams = parameterList ("CrsGraph");
+        } else {
+          graphparams = sublist (params, "CrsGraph");
+        }
         if (useLocalIndices) {
-          const LO localMinLID = inputRowMap.getMinLocalIndex ();
-          const LO localMaxLID = inputRowMap.getMaxLocalIndex ();
+          RCP<const output_map_type> clonedColMap =
+            graphIn.getColMap ()->template clone<typename OutputCrsGraphType::node_type> (nodeOut);
+          if (boundSameForAllLocalRows) {
+            clonedGraph = rcp (new OutputCrsGraphType (clonedRowMap, clonedColMap,
+                                                       numEntriesForAll, pftype,
+                                                       graphparams));
+          } else {
+            clonedGraph = rcp (new OutputCrsGraphType (clonedRowMap, clonedColMap,
+                                                       numEntriesPerRow, pftype,
+                                                       graphparams));
+          }
+        } else {
+          if (boundSameForAllLocalRows) {
+            clonedGraph = rcp (new OutputCrsGraphType (clonedRowMap,
+                                                       numEntriesForAll, pftype,
+                                                       graphparams));
+          } else {
+            clonedGraph = rcp (new OutputCrsGraphType (clonedRowMap,
+                                                       numEntriesPerRow,
+                                                       pftype, graphparams));
+          }
+        }
 
-          if (graphIn.isLocallyIndexed ()) {
-            if (numRows != 0) {
+        if (debug) {
+          std::ostringstream os;
+          os << "Process " << myRank << ": Invoked output graph's constructor" << endl;
+          cerr << os.str ();
+        }
+
+        // done with these
+        numEntriesPerRow = null;
+        numEntriesForAll = 0;
+      }
+
+      const input_map_type& inputRowMap = * (graphIn.getRowMap ());
+      const size_type numRows =
+        static_cast<size_type> (inputRowMap.getNodeNumElements ());
+
+      bool failed = false;
+
+      if (useLocalIndices) {
+        const LO localMinLID = inputRowMap.getMinLocalIndex ();
+        const LO localMaxLID = inputRowMap.getMaxLocalIndex ();
+
+        if (graphIn.isLocallyIndexed ()) {
+          if (numRows != 0) {
+            try {
+              ArrayView<const LO> linds;
+              for (LO lrow = localMinLID; lrow <= localMaxLID; ++lrow) {
+                graphIn.getLocalRowView (lrow, linds);
+                if (linds.size () != 0) {
+                  clonedGraph->insertLocalIndices (lrow, linds);
+                }
+              }
+            }
+            catch (std::exception& e) {
+              std::ostringstream os;
+              os << "Process " << myRank << ": copying (reading local by view, "
+                "writing local) indices into the output graph threw an "
+                "exception: " << e.what () << endl;
+              cerr << os.str ();
+              failed = true;
+            }
+          }
+        }
+        else { // graphIn.isGloballyIndexed()
+          TEUCHOS_TEST_FOR_EXCEPTION
+            (! graphIn.hasColMap () && useLocalIndices, std::invalid_argument,
+             prefix << "You asked clone() to use local indices (by setting the "
+             "\"Locally indexed clone\" parameter to true), but the source graph "
+             "does not yet have a column Map, so this is impossible.");
+
+          // The input graph has a column Map, but is globally indexed.
+          // That's a bit weird, but we'll run with it.  In this case,
+          // getLocalRowView won't work, but getLocalRowCopy should
+          // still work; it will just have to convert from global to
+          // local indices internally.
+
+          try {
+            // Make space for getLocalRowCopy to put column indices.
+            //
+            // This is only a hint; we may have to resize in the loop
+            // below.  getNodeMaxNumRowEntries() may return nonsense if
+            // fill is active.  The key bool in CrsGraph is
+            // haveLocalConstants_.
+            size_t myMaxNumRowEntries =
+              graphIn.isFillActive () ? static_cast<size_t> (0) :
+              graphIn.getNodeMaxNumRowEntries ();
+
+            Array<LO> linds (myMaxNumRowEntries);
+
+            // Copy each row into the new graph, using local indices.
+            for (LO lrow = localMinLID; lrow <= localMaxLID; ++lrow) {
+              size_t theNumEntries = graphIn.getNumEntriesInLocalRow (lrow);
+              if (theNumEntries > myMaxNumRowEntries) {
+                myMaxNumRowEntries = theNumEntries;
+                linds.resize (myMaxNumRowEntries);
+              }
+              graphIn.getLocalRowCopy (lrow, linds (), theNumEntries);
+              if (theNumEntries != 0) {
+                clonedGraph->insertLocalIndices (lrow, linds (0, theNumEntries));
+              }
+            }
+          }
+          catch (std::exception& e) {
+            std::ostringstream os;
+            os << "Process " << myRank << ": copying (reading local by copy, "
+              "writing local) indices into the output graph threw an exception: "
+               << e.what () << endl;
+            cerr << os.str ();
+            failed = true;
+          }
+        }
+      }
+      else { /* useGlobalIndices */
+        if (numRows != 0) {
+          const GO localMinGID = inputRowMap.getMinGlobalIndex ();
+          const GO localMaxGID = inputRowMap.getMaxGlobalIndex ();
+          const bool inputRowMapIsContiguous = inputRowMap.isContiguous ();
+
+          if (graphIn.isGloballyIndexed ()) {
+            ArrayView<const GO> ginds;
+
+            if (inputRowMapIsContiguous) {
               try {
-                ArrayView<const LO> linds;
-                for (LO lrow = localMinLID; lrow <= localMaxLID; ++lrow) {
-                  graphIn.getLocalRowView (lrow, linds);
-                  if (linds.size () != 0) {
-                    clonedGraph->insertLocalIndices (lrow, linds);
+                for (GO grow = localMinGID; grow <= localMaxGID; ++grow) {
+                  graphIn.getGlobalRowView (grow, ginds);
+                  if (ginds.size () != 0) {
+                    clonedGraph->insertGlobalIndices (grow, ginds);
                   }
                 }
               }
               catch (std::exception& e) {
                 std::ostringstream os;
-                os << "Process " << myRank << ": copying (reading local by view, "
-                  "writing local) indices into the output graph threw an "
+                os << "Process " << myRank << ": copying (reading global by view, "
+                  "writing global) indices into the output graph threw an "
+                  "exception: " << e.what () << endl;
+                cerr << os.str ();
+                failed = true;
+              }
+            }
+            else { // input row Map is not contiguous
+              try {
+                ArrayView<const GO> inputRowMapGIDs = inputRowMap.getNodeElementList ();
+                for (size_type k = 0; k < numRows; ++k) {
+                  const GO grow = inputRowMapGIDs[k];
+                  graphIn.getGlobalRowView (grow, ginds);
+                  if (ginds.size () != 0) {
+                    clonedGraph->insertGlobalIndices (grow, ginds);
+                  }
+                }
+              }
+              catch (std::exception& e) {
+                std::ostringstream os;
+                os << "Process " << myRank << ": copying (reading global by view, "
+                  "writing global) indices into the output graph threw an "
                   "exception: " << e.what () << endl;
                 cerr << os.str ();
                 failed = true;
               }
             }
           }
-          else { // graphIn.isGloballyIndexed()
-            TEUCHOS_TEST_FOR_EXCEPTION(
-                                       ! graphIn.hasColMap () && useLocalIndices, std::invalid_argument,
-                                       prefix << "You asked clone() to use local indices (by setting the "
-                                       "\"Locally indexed clone\" parameter to true), but the source graph "
-                                       "does not yet have a column Map, so this is impossible.");
+          else { // graphIn.isLocallyIndexed()
+            // Make space for getGlobalRowCopy to put column indices.
+            //
+            // This is only a hint; we may have to resize in the loop
+            // below.  getNodeMaxNumRowEntries() may return nonsense if
+            // fill is active.  The key bool in CrsGraph is
+            // haveLocalConstants_.
+            size_t myMaxNumRowEntries =
+              graphIn.isFillActive () ? static_cast<size_t> (0) :
+              graphIn.getNodeMaxNumRowEntries ();
 
-            // The input graph has a column Map, but is globally indexed.
-            // That's a bit weird, but we'll run with it.  In this case,
-            // getLocalRowView won't work, but getLocalRowCopy should
-            // still work; it will just have to convert from global to
-            // local indices internally.
+            Array<GO> ginds (myMaxNumRowEntries);
 
-            try {
-              // Make space for getLocalRowCopy to put column indices.
-              //
-              // This is only a hint; we may have to resize in the loop
-              // below.  getNodeMaxNumRowEntries() may return nonsense if
-              // fill is active.  The key bool in CrsGraph is
-              // haveLocalConstants_.
-              size_t myMaxNumRowEntries =
-                graphIn.isFillActive () ? static_cast<size_t> (0) :
-                graphIn.getNodeMaxNumRowEntries ();
-
-              Array<LO> linds (myMaxNumRowEntries);
-
-              // Copy each row into the new graph, using local indices.
-              for (LO lrow = localMinLID; lrow <= localMaxLID; ++lrow) {
-                size_t theNumEntries = graphIn.getNumEntriesInLocalRow (lrow);
-                if (theNumEntries > myMaxNumRowEntries) {
-                  myMaxNumRowEntries = theNumEntries;
-                  linds.resize (myMaxNumRowEntries);
-                }
-                graphIn.getLocalRowCopy (lrow, linds (), theNumEntries);
-                if (theNumEntries != 0) {
-                  clonedGraph->insertLocalIndices (lrow, linds (0, theNumEntries));
+            if (inputRowMapIsContiguous) {
+              try {
+                for (GO grow = localMinGID; grow <= localMaxGID; ++grow) {
+                  size_t theNumEntries = graphIn.getNumEntriesInGlobalRow (grow);
+                  if (theNumEntries > myMaxNumRowEntries) {
+                    myMaxNumRowEntries = theNumEntries;
+                    ginds.resize (myMaxNumRowEntries);
+                  }
+                  graphIn.getGlobalRowCopy (grow, ginds (), theNumEntries);
+                  if (theNumEntries != 0) {
+                    clonedGraph->insertGlobalIndices (grow, ginds (0, theNumEntries));
+                  }
                 }
               }
+              catch (std::exception& e) {
+                std::ostringstream os;
+                os << "Process " << myRank << ": copying (reading global by copy, "
+                  "writing global) indices into the output graph threw an "
+                  "exception: " << e.what () << endl;
+                cerr << os.str ();
+                failed = true;
+              }
             }
-            catch (std::exception& e) {
-              std::ostringstream os;
-              os << "Process " << myRank << ": copying (reading local by copy, "
-                "writing local) indices into the output graph threw an exception: "
-                 << e.what () << endl;
-              cerr << os.str ();
-              failed = true;
+            else { // input row Map is not contiguous
+              try {
+                ArrayView<const GO> inputRowMapGIDs = inputRowMap.getNodeElementList ();
+                for (size_type k = 0; k < numRows; ++k) {
+                  const GO grow = inputRowMapGIDs[k];
+
+                  size_t theNumEntries = graphIn.getNumEntriesInGlobalRow (grow);
+                  if (theNumEntries > myMaxNumRowEntries) {
+                    myMaxNumRowEntries = theNumEntries;
+                    ginds.resize (myMaxNumRowEntries);
+                  }
+                  graphIn.getGlobalRowCopy (grow, ginds (), theNumEntries);
+                  if (theNumEntries != 0) {
+                    clonedGraph->insertGlobalIndices (grow, ginds (0, theNumEntries));
+                  }
+                }
+              }
+              catch (std::exception& e) {
+                std::ostringstream os;
+                os << "Process " << myRank << ": copying (reading global by copy, "
+                  "writing global) indices into the output graph threw an "
+                  "exception: " << e.what () << endl;
+                cerr << os.str ();
+                failed = true;
+              }
             }
           }
-        }
-        else { /* useGlobalIndices */
-          if (numRows != 0) {
-            const GlobalOrdinal localMinGID = inputRowMap.getMinGlobalIndex ();
-            const GlobalOrdinal localMaxGID = inputRowMap.getMaxGlobalIndex ();
-            const bool inputRowMapIsContiguous = inputRowMap.isContiguous ();
+        } // numRows != 0
+      }
 
-            if (graphIn.isGloballyIndexed ()) {
-              ArrayView<const GlobalOrdinal> ginds;
+      if (debug) {
+        std::ostringstream os;
+        os << "Process " << myRank << ": copied entries" << endl;
+        cerr << os.str ();
+      }
 
-              if (inputRowMapIsContiguous) {
-                try {
-                  for (GO grow = localMinGID; grow <= localMaxGID; ++grow) {
-                    graphIn.getGlobalRowView (grow, ginds);
-                    if (ginds.size () != 0) {
-                      clonedGraph->insertGlobalIndices (grow, ginds);
-                    }
-                  }
-                }
-                catch (std::exception& e) {
-                  std::ostringstream os;
-                  os << "Process " << myRank << ": copying (reading global by view, "
-                    "writing global) indices into the output graph threw an "
-                    "exception: " << e.what () << endl;
-                  cerr << os.str ();
-                  failed = true;
-                }
-              }
-              else { // input row Map is not contiguous
-                try {
-                  ArrayView<const GO> inputRowMapGIDs = inputRowMap.getNodeElementList ();
-                  for (size_type k = 0; k < numRows; ++k) {
-                    const GO grow = inputRowMapGIDs[k];
-                    graphIn.getGlobalRowView (grow, ginds);
-                    if (ginds.size () != 0) {
-                      clonedGraph->insertGlobalIndices (grow, ginds);
-                    }
-                  }
-                }
-                catch (std::exception& e) {
-                  std::ostringstream os;
-                  os << "Process " << myRank << ": copying (reading global by view, "
-                    "writing global) indices into the output graph threw an "
-                    "exception: " << e.what () << endl;
-                  cerr << os.str ();
-                  failed = true;
-                }
-              }
-            }
-            else { // graphIn.isLocallyIndexed()
-              // Make space for getGlobalRowCopy to put column indices.
-              //
-              // This is only a hint; we may have to resize in the loop
-              // below.  getNodeMaxNumRowEntries() may return nonsense if
-              // fill is active.  The key bool in CrsGraph is
-              // haveLocalConstants_.
-              size_t myMaxNumRowEntries =
-                graphIn.isFillActive () ? static_cast<size_t> (0) :
-                graphIn.getNodeMaxNumRowEntries ();
-
-              Array<GO> ginds (myMaxNumRowEntries);
-
-              if (inputRowMapIsContiguous) {
-                try {
-                  for (GO grow = localMinGID; grow <= localMaxGID; ++grow) {
-                    size_t theNumEntries = graphIn.getNumEntriesInGlobalRow (grow);
-                    if (theNumEntries > myMaxNumRowEntries) {
-                      myMaxNumRowEntries = theNumEntries;
-                      ginds.resize (myMaxNumRowEntries);
-                    }
-                    graphIn.getGlobalRowCopy (grow, ginds (), theNumEntries);
-                    if (theNumEntries != 0) {
-                      clonedGraph->insertGlobalIndices (grow, ginds (0, theNumEntries));
-                    }
-                  }
-                }
-                catch (std::exception& e) {
-                  std::ostringstream os;
-                  os << "Process " << myRank << ": copying (reading global by copy, "
-                    "writing global) indices into the output graph threw an "
-                    "exception: " << e.what () << endl;
-                  cerr << os.str ();
-                  failed = true;
-                }
-              }
-              else { // input row Map is not contiguous
-                try {
-                  ArrayView<const GO> inputRowMapGIDs = inputRowMap.getNodeElementList ();
-                  for (size_type k = 0; k < numRows; ++k) {
-                    const GO grow = inputRowMapGIDs[k];
-
-                    size_t theNumEntries = graphIn.getNumEntriesInGlobalRow (grow);
-                    if (theNumEntries > myMaxNumRowEntries) {
-                      myMaxNumRowEntries = theNumEntries;
-                      ginds.resize (myMaxNumRowEntries);
-                    }
-                    graphIn.getGlobalRowCopy (grow, ginds (), theNumEntries);
-                    if (theNumEntries != 0) {
-                      clonedGraph->insertGlobalIndices (grow, ginds (0, theNumEntries));
-                    }
-                  }
-                }
-                catch (std::exception& e) {
-                  std::ostringstream os;
-                  os << "Process " << myRank << ": copying (reading global by copy, "
-                    "writing global) indices into the output graph threw an "
-                    "exception: " << e.what () << endl;
-                  cerr << os.str ();
-                  failed = true;
-                }
-              }
-            }
-          } // numRows != 0
-        }
-
-        if (debug) {
-          std::ostringstream os;
-          os << "Process " << myRank << ": copied entries" << endl;
-          cerr << os.str ();
-        }
-
-        if (fillCompleteClone) {
-          RCP<ParameterList> fillparams = params.is_null () ?
-            parameterList ("fillComplete") :
-            sublist (params, "fillComplete");
-          try {
-            RCP<const output_map_type> clonedRangeMap;
-            RCP<const output_map_type> clonedDomainMap;
-            if (! graphIn.getRangeMap ().is_null () &&
-                graphIn.getRangeMap () != graphIn.getRowMap ()) {
-              clonedRangeMap =
-                graphIn.getRangeMap ()->template clone<OutputNodeType> (nodeOut);
-            }
-            else {
-              clonedRangeMap = clonedRowMap;
-            }
-            if (! graphIn.getDomainMap ().is_null ()
-                && graphIn.getDomainMap () != graphIn.getRowMap ()) {
-              clonedDomainMap =
-                graphIn.getDomainMap ()->template clone<OutputNodeType> (nodeOut);
-            }
-            else {
-              clonedDomainMap = clonedRowMap;
-            }
-
-            if (debug) {
-              std::ostringstream os;
-              os << "Process " << myRank << ": About to call fillComplete on "
-                "cloned graph" << endl;
-              cerr << os.str ();
-            }
-            clonedGraph->fillComplete (clonedDomainMap, clonedRangeMap, fillparams);
+      if (fillCompleteClone) {
+        RCP<ParameterList> fillparams = params.is_null () ?
+          parameterList ("fillComplete") :
+          sublist (params, "fillComplete");
+        try {
+          RCP<const output_map_type> clonedRangeMap;
+          RCP<const output_map_type> clonedDomainMap;
+          if (! graphIn.getRangeMap ().is_null () &&
+              graphIn.getRangeMap () != graphIn.getRowMap ()) {
+            clonedRangeMap =
+              graphIn.getRangeMap ()->template clone<typename OutputCrsGraphType::node_type> (nodeOut);
           }
-          catch (std::exception &e) {
-            failed = true;
+          else {
+            clonedRangeMap = clonedRowMap;
+          }
+          if (! graphIn.getDomainMap ().is_null ()
+              && graphIn.getDomainMap () != graphIn.getRowMap ()) {
+            clonedDomainMap =
+              graphIn.getDomainMap ()->template clone<typename OutputCrsGraphType::node_type> (nodeOut);
+          }
+          else {
+            clonedDomainMap = clonedRowMap;
+          }
+
+          if (debug) {
             std::ostringstream os;
-            os << prefix << "Process " << myRank << ": Caught the following "
-              "exception while calling fillComplete() on clone of type"
-               << endl << Teuchos::typeName (*clonedGraph) << endl;
+            os << "Process " << myRank << ": About to call fillComplete on "
+              "cloned graph" << endl;
             cerr << os.str ();
           }
+          clonedGraph->fillComplete (clonedDomainMap, clonedRangeMap, fillparams);
         }
-
-        int lclSuccess = failed ? 0 : 1;
-        int gblSuccess = 1;
-        reduceAll<int, int> (comm, REDUCE_MIN, lclSuccess, outArg (gblSuccess));
-        TEUCHOS_TEST_FOR_EXCEPTION(
-                                   gblSuccess != 1, std::logic_error, prefix <<
-                                   "Clone failed on at least one process.");
-
-        if (debug) {
+        catch (std::exception &e) {
+          failed = true;
           std::ostringstream os;
-          os << "Process " << myRank << ": Done with CrsGraph::clone" << endl;
+          os << prefix << "Process " << myRank << ": Caught the following "
+            "exception while calling fillComplete() on clone of type"
+             << endl << Teuchos::typeName (*clonedGraph) << endl;
           cerr << os.str ();
         }
-        return clonedGraph;
       }
-    };
+
+      int lclSuccess = failed ? 0 : 1;
+      int gblSuccess = 1;
+      reduceAll<int, int> (comm, REDUCE_MIN, lclSuccess, outArg (gblSuccess));
+      TEUCHOS_TEST_FOR_EXCEPTION
+        (gblSuccess != 1, std::logic_error, prefix <<
+         "Clone failed on at least one process.");
+
+      if (debug) {
+        std::ostringstream os;
+        os << "Process " << myRank << ": Done with CrsGraph::clone" << endl;
+        cerr << os.str ();
+      }
+      return clonedGraph;
+    }
 
   } // namespace Details
 } // namespace Tpetra

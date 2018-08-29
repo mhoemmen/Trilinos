@@ -42,6 +42,7 @@
 #ifndef TPETRA_CRSGRAPH_FWD_HPP
 #define TPETRA_CRSGRAPH_FWD_HPP
 
+#include "Tpetra_Details_Aliases.hpp"
 #include "Tpetra_Details_DefaultTypes.hpp"
 
 /// \file Tpetra_CrsGraph_fwd.hpp
@@ -65,10 +66,11 @@ template <class LO, class GO, class N> class CrsGraph;
 } // namespace Classes
 
 //! Alias for Tpetra::Classes::CrsGraph.
-template<class LocalOrdinal = ::Tpetra::Details::DefaultTypes::local_ordinal_type,
-         class GlobalOrdinal = ::Tpetra::Details::DefaultTypes::global_ordinal_type,
-         class Node = ::Tpetra::Details::DefaultTypes::node_type>
-using CrsGraph = Classes::CrsGraph<LocalOrdinal, GlobalOrdinal, Node>;
+template<class ... Args>
+using CrsGraph = typename ::Tpetra::Details::ThreeArgAlias<
+  Classes::CrsGraph,
+  ::Tpetra::Details::DefaultTemplateParameters,
+  Args...>::type;
 
 } // namespace Tpetra
 

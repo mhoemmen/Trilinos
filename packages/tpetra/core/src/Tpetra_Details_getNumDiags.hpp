@@ -332,7 +332,7 @@ namespace Impl {
       using NT = typename MatrixType::node_type;
       using row_graph_type = ::Tpetra::RowGraph<LO, GO, NT>;
 
-      auto G = A.getGraph ();
+      Teuchos::RCP<const row_graph_type> G = A.getGraph ();
       if (G.get () == nullptr) {
         return 0;
       }
@@ -345,14 +345,14 @@ namespace Impl {
   /// \brief Specialization of GetLocalNumDiags for RowGraph.
   template<class LO, class GO, class NT>
   struct GetLocalNumDiags< ::Tpetra::RowGraph<LO, GO, NT> > {
-    static LO
+    static typename ::Tpetra::RowGraph<LO, GO, NT>::local_ordinal_type
     getLocalNumDiags (const ::Tpetra::RowGraph<LO, GO, NT>& G)
     {
       using crs_graph_type = ::Tpetra::CrsGraph<LO, GO, NT>;
 
       const crs_graph_type* G_crs = dynamic_cast<const crs_graph_type*> (&G);
       if (G_crs != nullptr && G_crs->isFillComplete ()) {
-        return countLocalNumDiagsInFillCompleteGraph (*G_crs);
+        return countLocalNumDiagsInFillCompleteGraph<LO, GO, NT> (*G_crs);
       }
       else {
         if (G.isLocallyIndexed ()) {
@@ -380,10 +380,22 @@ namespace Impl {
 
   /// \brief Specialization of GetLocalNumDiags for CrsGraph.
   template<class LO, class GO, class NT>
-  struct GetLocalNumDiags< ::Tpetra::CrsGraph<LO, GO, NT> > {
-    static LO
-    getLocalNumDiags (const ::Tpetra::CrsGraph<LO, GO, NT>& G)
+  struct GetLocalNumDiags< ::Tpetra::Classes::CrsGraph<LO, GO, NT> > {
+    static typename ::Tpetra::Classes::CrsGraph<LO, GO, NT>::local_ordinal_type
+    getLocalNumDiags (const ::Tpetra::Classes::CrsGraph<LO, GO, NT>& G)
     {
+      // This is a temporary measure until we finish applying
+      // ThreeArgAlias to RowGraph.  See #2548 and #57.  Once we fix
+      // that, we can replace the typedefs below with the following
+      // commented-out line:
+      //
+      // using row_graph_type = ::Tpetra::RowGraph<Args...>;
+
+      //using crs_graph_type = ::Tpetra::CrsGraph<Args...>;
+      //using crs_graph_type = ::Tpetra::CrsGraph<LO, GO, NT>;
+      // using LO = typename crs_graph_type::local_ordinal_type;
+      // using GO = typename crs_graph_type::global_ordinal_type;
+      // using NT = typename crs_graph_type::node_type;
       using row_graph_type = ::Tpetra::RowGraph<LO, GO, NT>;
       return GetLocalNumDiags<row_graph_type>::getLocalNumDiags (G);
     }

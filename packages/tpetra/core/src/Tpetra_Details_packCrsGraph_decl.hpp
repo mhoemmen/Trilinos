@@ -202,9 +202,9 @@ packCrsGraphNew (const CrsGraph<LO, GO, NT>& sourceGraph,
 /// of data, this procedure could be bypassed.
 template<typename LO, typename GO, typename NT>
 void
-packCrsGraphWithOwningPIDs (const CrsGraph<LO,GO,NT>& sourceGraph,
-                            Kokkos::DualView<typename CrsGraph<LO,GO,NT>::packet_type*,
-                                             typename CrsGraph<LO,GO,NT>::buffer_device_type>&
+packCrsGraphWithOwningPIDs (const ::Tpetra::CrsGraph<LO, GO, NT>& sourceGraph,
+                            Kokkos::DualView<typename ::Tpetra::CrsGraph<LO, GO, NT>::packet_type*,
+                                             typename ::Tpetra::CrsGraph<LO, GO, NT>::buffer_device_type>&
                                              exports_dv,
                             const Teuchos::ArrayView<size_t>& numPacketsPerLID,
                             const Teuchos::ArrayView<const LO>& exportLIDs,
