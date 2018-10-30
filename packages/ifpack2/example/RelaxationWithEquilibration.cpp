@@ -3,15 +3,20 @@
 #include "BelosTpetraAdapter.hpp"
 #include "BelosSolverFactory.hpp"
 #include "MatrixMarket_Tpetra.hpp"
+#include "Tpetra_ComputeGatherMap.hpp"
 #include "Tpetra_computeRowAndColumnOneNorms.hpp"
 #include "Tpetra_CrsMatrix.hpp"
 #include "Tpetra_MultiVector.hpp"
 #include "Tpetra_Core.hpp"
 #include "Tpetra_leftAndOrRightScaleCrsMatrix.hpp"
 #include "Teuchos_CommandLineProcessor.hpp"
+#include "Teuchos_CommHelpers.hpp"
 #include "Teuchos_ParameterList.hpp"
+#include "Teuchos_LAPACK.hpp"
 //#include "Teuchos_ParameterXMLFileReader.hpp"
 #include "KokkosBlas1_abs.hpp"
+#include "KokkosBlas1_nrm2.hpp"
+#include "KokkosBlas3_gemm.hpp"
 
 #include <algorithm> // std::transform
 #include <cctype> // std::toupper
@@ -19,6 +24,203 @@
 #include <functional>
 
 namespace { // (anonymous)
+
+template<class SC, class LO, class GO, class NT>
+std::pair<Teuchos::RCP<Tpetra::CrsMatrix<SC, LO, GO, NT> >,
+	  Teuchos::RCP<Tpetra::MultiVector<SC, LO, GO, NT> > >
+gatherCrsMatrixAndMultiVector (LO& errCode,
+			       const Tpetra::CrsMatrix<SC, LO, GO, NT>& A,
+			       const Tpetra::MultiVector<SC, LO, GO, NT>& B)
+{
+  using Tpetra::Details::computeGatherMap;
+  using crs_matrix_type = Tpetra::CrsMatrix<SC, LO, GO, NT>;
+  using export_type = Tpetra::Export<LO, GO, NT>;
+  using mv_type = Tpetra::MultiVector<SC, LO, GO, NT>;
+  
+  auto rowMap_gathered = computeGatherMap (A.getRowMap (), Teuchos::null);
+  export_type exp (A.getRowMap (), rowMap_gathered);
+  auto A_gathered =
+    Teuchos::rcp (new crs_matrix_type (rowMap_gathered,
+				       A.getGlobalMaxNumRowEntries (),
+				       Tpetra::StaticProfile));
+  A_gathered->doExport (A, exp, Tpetra::INSERT);
+  auto domainMap_gathered = computeGatherMap (A.getDomainMap (), Teuchos::null);
+  auto rangeMap_gathered = computeGatherMap (A.getRangeMap (), Teuchos::null);        
+  A_gathered->fillComplete (domainMap_gathered, rangeMap_gathered);
+
+  auto B_gathered =
+    Teuchos::rcp (new mv_type (rangeMap_gathered, B.getNumVectors ()));
+  B_gathered->doExport (B, exp, Tpetra::ADD);
+
+  return std::make_pair (A_gathered, B_gathered);
+}
+  
+using host_device_type = Kokkos::Device<Kokkos::DefaultHostExecutionSpace, Kokkos::HostSpace>;
+
+template<class SC = Tpetra::MultiVector<>::scalar_type,
+	 class LO = Tpetra::MultiVector<>::local_ordinal_type,
+	 class GO = Tpetra::MultiVector<>::global_ordinal_type,
+	 class NT = Tpetra::MultiVector<>::node_type>
+using HostDenseMatrix =
+  Kokkos::View<typename Tpetra::MultiVector<SC, LO, GO, NT>::impl_scalar_type**,
+	       Kokkos::LayoutLeft,
+	       host_device_type>;
+
+template<class SC, class LO, class GO, class NT>
+HostDenseMatrix<SC, LO, GO, NT>
+densifyGatheredCrsMatrix (LO& errCode,
+			  const Tpetra::CrsMatrix<SC, LO, GO, NT>& A,
+			  const std::string& label)
+{
+  const LO numRows = LO (A.getRangeMap ()->getNodeNumElements ());
+  const LO numCols = LO (A.getDomainMap ()->getNodeNumElements ());
+  
+  using dense_matrix_type = HostDenseMatrix<SC, LO, GO, NT>;
+  dense_matrix_type A_dense (label, numRows, numCols);
+
+  for (LO lclRow = 0; lclRow < numRows; ++lclRow) {
+    LO numEnt = 0;	  
+    const LO* lclColInds = nullptr;
+    const SC* vals = nullptr;
+    const LO curErrCode = A.getLocalRowView (lclRow, numEnt, vals, lclColInds);
+    if (errCode != 0) {
+      errCode = curErrCode;
+    }
+    else {
+      for (LO k = 0; k < numEnt; ++k) {
+	const LO lclCol = lclColInds[k];
+	using impl_scalar_type =
+	  typename Tpetra::CrsMatrix<SC, LO, GO, NT>::impl_scalar_type;
+	A_dense(lclRow, lclCol) += impl_scalar_type (vals[k]);
+      }
+    }
+  }
+
+  return A_dense;
+}
+
+template<class SC, class LO, class GO, class NT>
+HostDenseMatrix<SC, LO, GO, NT>
+copyGatheredMultiVector (Tpetra::MultiVector<SC, LO, GO, NT>& X,
+			 const std::string& label)
+{
+  using dense_matrix_type = HostDenseMatrix<SC, LO, GO, NT>;
+  using dev_memory_space = typename Tpetra::MultiVector<SC, LO, GO, NT>::device_type::memory_space;
+
+  X.template sync<Kokkos::HostSpace> ();
+  auto X_lcl = X.template getLocalView<Kokkos::HostSpace> ();
+  dense_matrix_type X_copy (label, X.getLocalLength (), X.getNumVectors ());
+  Kokkos::deep_copy (X_copy, X_lcl);
+
+  X.template sync<dev_memory_space> ();
+  return X_copy;
+}
+
+template<class SC, class LO, class GO, class NT>
+LO
+gatherAndDensify (HostDenseMatrix<SC, LO, GO, NT>& A_dense,
+		  HostDenseMatrix<SC, LO, GO, NT>& B_dense,
+		  const Tpetra::CrsMatrix<SC, LO, GO, NT>& A,
+		  Tpetra::MultiVector<SC, LO, GO, NT>& B)
+{
+  LO errCode = 0;
+  auto A_and_B_gathered = gatherCrsMatrixAndMultiVector (errCode, A, B);
+
+  if (errCode == 0) {
+    A_dense = densifyGatheredCrsMatrix (errCode, * (A_and_B_gathered.first), "A_dense");
+    B_dense = copyGatheredMultiVector (B, "B_dense");
+  }
+  return errCode;
+}
+
+template<class DenseMatrixType>
+void
+solveLeastSquaresProblemAndReport (DenseMatrixType A,
+				   DenseMatrixType B,
+				   const double RCOND = -1.0 /* negative means use machine precision */)
+{
+  const int numRows = int (A.extent (0));
+  const int numCols = int (A.extent (1));
+  const int NRHS = int (B.extent (1));
+
+  DenseMatrixType A_copy ("A_copy", numRows, numCols);
+  Kokkos::deep_copy (A_copy, A);
+  
+  DenseMatrixType B_copy ("B_copy", numRows, NRHS);
+  Kokkos::deep_copy (B_copy, B);  
+  //DenseMatrixType X ("X", numCols, NRHS);
+
+  const int LDA = (numRows == 0) ? 1 : int (A_copy.stride (1));
+  const int LDB = (numRows == 0) ? 1 : int (B_copy.stride (1));
+
+  std::vector<double> S (std::min (numRows, numCols));
+  int RANK = 0;
+  int LWORK = -1; // workspace query
+  int INFO = 0;
+  Teuchos::LAPACK<int, double> lapack;
+
+  using std::cerr;
+  using std::cout;
+  using std::endl;
+  cout << "Solver:" << endl
+       << "  Solver type: LAPACK's DGELSS" << endl;
+
+  std::vector<double> WORK (1);
+  lapack.GELSS (numRows, numCols, NRHS, A_copy.data (), LDA,
+		B_copy.data (), LDB,
+		S.data (), RCOND, &RANK, WORK.data (), LWORK, &INFO);
+  if (INFO != 0) {
+    cerr << "DGELSS returned INFO = " << INFO << " != 0." << endl;
+    return;
+  }
+  LWORK = int (WORK[0]);
+  if (LWORK < 0) {
+    cerr << "DGELSS reported LWORK = " << LWORK << " < 0." << endl;
+    return;
+  }
+  WORK.resize (LWORK);
+  lapack.GELSS (numRows, numCols, NRHS, A_copy.data (), LDA,
+		B_copy.data (), LDB,
+		S.data (), RCOND, &RANK, WORK.data (), LWORK, &INFO);
+
+  cout << "Results:" << endl
+       << "  INFO: " << INFO << endl
+       << "  RCOND: " << RCOND << endl
+       << "  Singular values: ";
+  for (double sigma : S) {
+    cout << sigma << " ";
+  }
+  cout << endl;
+
+  if (numRows == numCols) {
+    std::vector<double> B_norms (NRHS);
+    for (int k = 0; k < NRHS; ++k) {
+      B_norms[k] =
+	KokkosBlas::nrm2 (Kokkos::subview (B, Kokkos::ALL (), k));
+    }
+    
+    auto X = B_copy;
+    DenseMatrixType R ("R", numRows, NRHS);
+    Kokkos::deep_copy (R, B);
+    KokkosBlas::gemm ("N", "N", -1.0, A, X, +1.0, R);
+
+    std::vector<double> explicitResidualNorms (NRHS);
+    for (int k = 0; k < NRHS; ++k) {
+      explicitResidualNorms[k] =
+	KokkosBlas::nrm2 (Kokkos::subview (R, Kokkos::ALL (), k));
+    }
+
+    for (int j = 0; j < NRHS; ++j) {
+      cout << "  For right-hand side " << j
+	   << ": ||B-A*X||_2 = "
+	   << explicitResidualNorms[j]
+	   << ", ||B||_2 = " << B_norms[j] << endl;
+    }
+  }
+}
+
+
+  
 
 template<class SC, class LO, class GO, class NT>
 Teuchos::RCP<Tpetra::CrsMatrix<SC, LO, GO, NT> >
@@ -533,6 +735,7 @@ struct CmdLineArgs {
   bool assumeSymmetric = false;
   bool assumeZeroInitialGuess = true;
   bool useDiagonalToEquilibrate = false;
+  bool useLapack = false;
 };
 
 // Read in values of command-line arguments.
@@ -577,6 +780,11 @@ getCmdLineArgs (CmdLineArgs& args, int argc, char* argv[])
                   &args.useDiagonalToEquilibrate,
                   "Whether equilibration should use the matrix's diagonal; "
                   "default is to use row and column one norms");
+  cmdp.setOption ("lapack", "no-lapack",
+                  &args.useLapack,
+                  "Whether to compare against LAPACK's LU factorization "
+		  "(expert driver).  If --equilibration, then use "
+		  "equilibration in LAPACK too.");
 
   auto result = cmdp.parse (argc, argv);
   return result == Teuchos::CommandLineProcessor::PARSE_SUCCESSFUL;
@@ -1160,6 +1368,145 @@ main (int argc, char* argv[])
   }
 
   auto A_original = deepCopyFillCompleteCrsMatrix (*A);
+
+  if (args.useLapack) {
+    using std::cout;
+
+    using lapack_matrix_type = HostDenseMatrix<>;
+    lapack_matrix_type A_lapack;
+    lapack_matrix_type B_lapack;
+    int errCode = gatherAndDensify (A_lapack, B_lapack, *A, *B);
+    
+    int lapackSolveOk = (errCode == 0) ? 1 : 0;
+    Teuchos::broadcast (*comm, 0, Teuchos::inOutArg (lapackSolveOk));
+    if (lapackSolveOk != 1) {
+      if (comm->getRank () == 0) {
+	cerr << "Gathering and densification for LAPACK solve FAILED!" << endl;
+      }
+    }
+    
+    if (lapackSolveOk && comm->getRank () == 0) {
+      const int numRows = int (A_lapack.extent (0));
+      const int numCols = int (A_lapack.extent (1));
+      const int LDA = (numRows == 0) ? 1 : A_lapack.stride (1);
+      const int NRHS = int (B_lapack.extent (1));
+      const int LDB = (numRows == 0) ? 1 : B_lapack.stride (1);
+
+      cout << "The matrix A, in dense format:" << endl;
+      for (int i = 0; i < numRows; ++i) {
+	for (int j = 0; j < numCols; ++j) { 	    
+	  cout << A_lapack(i,j);
+	  if (j + 1 < numCols) {
+	    cout << " ";
+	  }
+	}
+	cout << endl;
+      }
+      cout << endl;
+
+      cout << "The right-hand side(s) B, in dense format:" << endl;
+      for (int i = 0; i < numRows; ++i) {
+	for (int j = 0; j < NRHS; ++j) { 
+	  cout << B_lapack(i,j);
+	  if (j + 1 < NRHS) {
+	    cout << " ";
+	  }
+	}
+	cout << endl;
+      }
+      cout << endl;
+	
+      if (numRows != numCols) {
+	cerr << "Matrix is not square, so we can't use LAPACK's LU factorization on it!" << endl;
+	lapackSolveOk = 0;
+      }
+      else {
+	solveLeastSquaresProblemAndReport (A_lapack, B_lapack);
+	
+	Teuchos::LAPACK<int, double> lapack;
+
+	int INFO = 0;
+
+	lapack_matrix_type AF_lapack ("AF", numRows, numCols);
+	lapack_matrix_type X_lapack ("X_lapack", numCols, NRHS);
+	const int LDAF = (numRows == 0) ? 1 : AF_lapack.stride (1);
+	const int LDX = (numRows == 0) ? 1 : X_lapack.stride (1);
+
+	// Save norms of columns of B, since _GESVX may modify B.
+	std::vector<double> B_norms (NRHS);
+	for (int k = 0; k < NRHS; ++k) {
+	  B_norms[k] =
+	    KokkosBlas::nrm2 (Kokkos::subview (B_lapack, Kokkos::ALL (), k));
+	}
+
+	// Save a copy of A for later.
+	lapack_matrix_type A_copy ("A_copy", numRows, numCols);
+	Kokkos::deep_copy (A_copy, A_lapack);
+	
+	// Save a copy of B for later.
+	lapack_matrix_type R_lapack ("R_lapack", numRows, NRHS);
+	Kokkos::deep_copy (R_lapack, B_lapack);	  
+
+	std::vector<int> IPIV (numCols);
+	std::vector<double> R (numRows);
+	std::vector<double> C (numCols);
+	std::vector<double> FERR (NRHS);
+	std::vector<double> BERR (NRHS);
+	std::vector<double> WORK (4*numRows);
+	std::vector<int> IWORK (numRows);
+	INFO = 0;
+
+	const char FACT ('E');
+	const char TRANS ('N');	
+	char EQUED[1];
+	EQUED[0] = args.equilibrate ? 'B' : 'N';
+	double RCOND = 1.0;
+
+	cout << "Solver:" << endl
+	     << "  Solver type: LAPACK's _GESVX" << endl
+	     << "  Equilibrate: " << (args.equilibrate ? "YES" : "NO") << endl;
+	lapack.GESVX (FACT, TRANS, numRows, NRHS, A_lapack.data (), LDA,
+		      AF_lapack.data (), LDAF, IPIV.data (), EQUED, R.data (),
+		      C.data (), B_lapack.data (), LDB, X_lapack.data (), LDX,
+		      &RCOND, FERR.data (), BERR.data (), WORK.data (),
+		      IWORK.data (), &INFO);
+
+	cout << "Results:" << endl
+	     << "  INFO: " << INFO << endl
+	     << "  RCOND: " << RCOND << endl;
+	if (NRHS > 0) {
+	  cout << "  Pivot growth factor: " << WORK[0] << endl;
+	}
+	for (int j = 0; j < NRHS; ++j) {
+	  cout << "  For right-hand side " << j
+	       << ": forward error is " << FERR[j]
+	       << ", backward error is " << BERR[j] << endl;
+	}
+
+	// Compute the explicit residual norm(s).
+	KokkosBlas::gemm ("N", "N", -1.0, A_copy, X_lapack, +1.0, R_lapack);
+	std::vector<double> explicitResidualNorms (NRHS);
+	for (int k = 0; k < NRHS; ++k) {
+	  explicitResidualNorms[k] =
+	    KokkosBlas::nrm2 (Kokkos::subview (R_lapack, Kokkos::ALL (), k));
+	}
+
+	for (int j = 0; j < NRHS; ++j) {
+	  cout << "  For right-hand side " << j
+	       << ": ||B-A*X||_2 = "
+	       << explicitResidualNorms[j]
+	       << ", ||B||_2 = " << B_norms[j] << endl;
+	}
+      }
+    }
+    
+    Teuchos::broadcast (*comm, 0, Teuchos::inOutArg (lapackSolveOk));
+    if (lapackSolveOk != 1) {
+      if (comm->getRank () == 0) {
+	cerr << "LAPACK solve FAILED!" << endl;
+      }
+    }
+  }
 
   // Create the solver.
   BelosIfpack2Solver<crs_matrix_type> solver (A);
