@@ -485,6 +485,8 @@ namespace Belos {
     // Get the current solution std::vector.
     Teuchos::RCP<MV> X = lp_->getCurrLHSVec();
 
+    //MVT::Assign (*R_, *Rhat_);
+
     ////////////////////////////////////////////////////////////////
     // Iterate until the status test tells us to stop.
     //
@@ -496,28 +498,45 @@ namespace Belos {
 //      for(i=0; i<numRHS_; i++)
 //        std::cout << "r[" << i << "] = " << tempResids[i] << std::endl;
 
+      std::cerr << "*** Belos BiCGSTAB: iter_ = " << iter_ << std::endl;
+
       // Increment the iteration
       iter_++;
 
       // rho_new = <R_, Rhat_>
       MVT::MvDot(*R_,*Rhat_,rho_new);
 
-//      for(i=0; i<numRHS_; i++) {
-//        std::cout << "rho[" << i << "] = " << rho_new[i] << std::endl;
-//      }
+      for(i=0; i<numRHS_; i++) {
+	std::cerr << "  rho[" << i << "] = " << rho_new[i] << std::endl;
+      }
 
       // beta = ( rho_new / rho_old ) (alpha / omega )
       // TODO: None of these loops are currently threaded
-      for(i=0; i<numRHS_; i++) {
-        beta[i] = (rho_new[i] / rho_old_[i]) * (alpha_[i] / omega_[i]);
-//        std::cout << "beta[" << i << "] = " << beta[i] << std::endl;
+      if (iter_ > 0) {
+	for(i=0; i<numRHS_; i++) {
+	  beta[i] = (rho_new[i] / rho_old_[i]) * (alpha_[i] / omega_[i]);
+	  std::cerr << "  beta[" << i << "] = " << beta[i] << std::endl;
+	}
+
+	// p = r + beta (p - omega v)
+	// TODO: Is it safe to call MvAddMv with A or B = mv?
+	// TODO: Not all of these things have to be part of the state
+	axpy(one, *P_, omega_, *V_, *P_, true); // p = p - omega v
+	axpy(one, *R_, beta, *P_, *P_); // p = r + beta (p - omega v)
+      }
+      else {
+	std::cerr << "No beta yet" << std::endl;
+	MVT::Assign (*R_, *P_);
       }
 
-      // p = r + beta (p - omega v)
-      // TODO: Is it safe to call MvAddMv with A or B = mv?
-      // TODO: Not all of these things have to be part of the state
-      axpy(one, *P_, omega_, *V_, *P_, true); // p = p - omega v
-      axpy(one, *R_, beta, *P_, *P_); // p = r + beta (p - omega v)
+      {
+	using mag_type = typename Teuchos::ScalarTraits<ScalarType>::magnitudeType;
+	std::vector<mag_type> norms (numRHS_);
+	MVT::MvNorm (*P_, norms);
+	for(i=0; i<numRHS_; i++) {
+	  std::cout << "  ||P_" << i << "||_2 = " << norms[i] << std::endl;
+	}
+      }      
 
       // y = K\p, unless K does not exist
       // TODO: There may be a more efficient way to apply the preconditioners
@@ -536,19 +555,45 @@ namespace Belos {
       else if(lp_->isRightPrec()) {
         lp_->applyRightPrec(*P_,*Y);
       }
+      else {
+	TEUCHOS_TEST_FOR_EXCEPT(P_.get () != Y.get());
+      	//MVT::Assign (*P_, *Y); // y = p
+      }
 
       // v = Ay
       lp_->applyOp(*Y,*V_);
 
+      {
+	using mag_type = typename Teuchos::ScalarTraits<ScalarType>::magnitudeType;
+	std::vector<mag_type> norms (numRHS_);
+	MVT::MvNorm (*Y, norms);
+	for(i=0; i<numRHS_; i++) {
+	  std::cout << "  ||Y_" << i << "||_2 = " << norms[i] << std::endl;
+	}
+	MVT::MvNorm (*V_, norms);
+	for(i=0; i<numRHS_; i++) {
+	  std::cout << "  ||V_" << i << "||_2 = " << norms[i] << std::endl;
+	}
+	MVT::MvNorm (*Rhat_, norms);
+	for(i=0; i<numRHS_; i++) {
+	  std::cout << "  ||Rhat_" << i << "||_2 = " << norms[i] << std::endl;
+	}
+      }
+
       // alpha = rho_new / <Rhat, V>
       MVT::MvDot(*V_,*Rhat_,rhatV);
+
+      for(i=0; i<numRHS_; i++) {
+        std::cout << "  rhatV[" << i << "] = " << rhatV[i] << std::endl;
+      }
+      
       for(i=0; i<numRHS_; i++) {
         alpha_[i] = rho_new[i] / rhatV[i];
       }
 
-//      for(i=0; i<numRHS_; i++) {
-//        std::cout << "alpha[" << i << "] = " << alpha_[i] << std::endl;
-//      }
+      for(i=0; i<numRHS_; i++) {
+        std::cout << "  alpha[" << i << "] = " << alpha_[i] << std::endl;
+      }
 
       // s = r - alpha v
       axpy(one, *R_, alpha_, *V_, *S, true);
@@ -568,6 +613,10 @@ namespace Belos {
       }
       else if(lp_->isRightPrec()) {
         lp_->applyRightPrec(*S,*Z);
+      }
+      else {
+	TEUCHOS_TEST_FOR_EXCEPT(S.get () != Z.get());
+      	//MVT::Assign (*S, *Z); // z = s
       }
 
       // t = Az
@@ -596,9 +645,9 @@ namespace Belos {
         omega_[i] = tS[i] / tT[i];
       }
 
-//      for(i=0; i<numRHS_; i++) {
-//        std::cout << "omega[" << i << "] = " << omega_[i] << " = " << tS[i] << " / " << tT[i] << std::endl;
-//      }
+      for(i=0; i<numRHS_; i++) {
+        std::cout << "  omega[" << i << "] = " << omega_[i] << " = " << tS[i] << " / " << tT[i] << std::endl;
+      }
 
       // x = x + alpha y + omega z
       axpy(one, *X, alpha_, *Y, *X); // x = x + alpha y
