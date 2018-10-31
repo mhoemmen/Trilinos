@@ -25,6 +25,141 @@
 
 namespace { // (anonymous)
 
+template<class MV>
+auto norm (const MV& X) -> decltype (X.getVector (0)->norm2 ())
+{
+  return X.getVector (0)->norm2 ();
+}
+
+template<class MV, class OP>
+void residual (MV& R, const MV& B, const OP& A, const MV& X)
+{
+  using STS = Teuchos::ScalarTraits<typename MV::scalar_type>;
+  
+  Tpetra::deep_copy (R, B);
+  A.apply (X, R, Teuchos::NO_TRANS, -STS::one (), STS::one ());
+}
+
+template<class MV>
+typename MV::dot_type dot (const MV& X, const MV& Y)
+{
+  Teuchos::Array<typename MV::dot_type> dots (X.getNumVectors ());
+  Y.dot (X, dots ());
+  return dots[0];
+}
+
+template<class MV, class OP>
+std::tuple<typename MV::mag_type, int, bool>
+bicgstab (MV& x,
+	  const OP& A,
+	  const OP* const M,
+	  const MV& b,
+	  const int max_it,
+	  const typename MV::mag_type tol)
+{
+  using STS = Teuchos::ScalarTraits<typename MV::scalar_type>;
+  using STM = Teuchos::ScalarTraits<typename MV::mag_type>;
+  using dot_type = typename MV::dot_type;
+  using mag_type = typename MV::mag_type;  
+  
+  int iter = 0;
+  int flag = 0;
+
+  mag_type bnrm2 = norm (b);
+  if (bnrm2 == STM::zero ()) {
+    x.putScalar (STS::zero ());
+    bnrm2 = STM::one ();
+    return {bnrm2, 0, true};
+  }
+
+  MV r (b.getMap (), b.getNumVectors ());
+
+  residual (r, b, A, x); // r = b - A*x;
+  mag_type error = norm (r) / bnrm2;
+  if (error < tol) {
+    return {error, 0, true};
+  }
+  dot_type omega = STS::one ();
+  dot_type alpha;
+  dot_type rho;
+  dot_type rho_1;  
+  dot_type beta;
+  mag_type resid;
+
+  MV r_tld (r.getMap (), r.getNumVectors ());
+  Tpetra::deep_copy (r_tld, r);
+
+  MV p (r.getMap (), r.getNumVectors ());
+  MV p_hat (x.getMap (), r.getNumVectors ());
+  MV v (r.getMap (), r.getNumVectors ());
+  MV s (r.getMap (), r.getNumVectors ());
+  MV s_hat (r.getMap (), r.getNumVectors ());
+  MV t (r.getMap (), r.getNumVectors ());    
+
+  for (iter = 1; iter <= max_it; ++iter) {
+    rho = dot (r_tld, r); // ( r_tld'*r );
+    if (rho == 0.0) {
+      return {error, iter, false};
+    }
+
+    if (iter > 1) {
+      beta = (rho / rho_1) * (alpha / omega);
+      p.update (-omega, v, 0.0); // p = p - omega*v
+      p.update (1.0, r, beta, p, 0.0); // p = r + beta*( p - omega*v );
+    }
+    else {
+      p = r;
+    }
+
+    if (M != nullptr) {
+      M->apply (p, p_hat);
+    }
+    else {
+      Tpetra::deep_copy (p_hat, p);
+    }
+
+    A.apply (p_hat, v);
+
+    alpha = rho / dot (r_tld, v);
+    s.update (1.0, r, -alpha, v, 0.0); // s = r - alpha*v;
+    if (norm(s) < tol) {
+      // x = x + alpha*p_hat;
+      resid = norm (s) / bnrm2;
+      break;
+    }
+
+    if (M != nullptr) {
+      M->apply (s, s_hat);
+    }
+    else {
+      Tpetra::deep_copy (s_hat, s);
+    }
+
+    A.apply (s_hat, t);
+    omega = dot (t, s) / dot (t, t);
+
+    // x = x + alpha*p_hat + omega*s_hat;
+    x.update (alpha, p_hat, omega, s_hat, 1.0); 
+    r.update (1.0, s, -omega, t, 0.0); // r = s - omega*t
+
+    error = norm (r) / bnrm2;
+    if (error <= tol) {
+      break;
+    }
+    if (omega == 0.0) {
+      break;
+    }
+    rho_1 = rho;
+  }
+
+  if (error <= tol) {
+    return {error, iter, true};
+  }
+  else {
+    return {error, iter, false};
+  }
+}
+
 template<class SC, class LO, class GO, class NT>
 std::pair<Teuchos::RCP<Tpetra::CrsMatrix<SC, LO, GO, NT> >,
 	  Teuchos::RCP<Tpetra::MultiVector<SC, LO, GO, NT> > >
@@ -216,6 +351,7 @@ solveLeastSquaresProblemAndReport (DenseMatrixType A,
 	   << explicitResidualNorms[j]
 	   << ", ||B||_2 = " << B_norms[j] << endl;
     }
+    cout << endl;
   }
 }
 
@@ -273,7 +409,7 @@ findEigenvaluesAndReport (DenseMatrixType A)
       cout << ", ";
     }
   }
-  cout << endl;
+  cout << endl << endl;
 }
   
 
@@ -791,6 +927,7 @@ struct CmdLineArgs {
   bool assumeZeroInitialGuess = true;
   bool useDiagonalToEquilibrate = false;
   bool useLapack = false;
+  bool useCustomBicgstab = false;
 };
 
 // Read in values of command-line arguments.
@@ -840,6 +977,10 @@ getCmdLineArgs (CmdLineArgs& args, int argc, char* argv[])
                   "Whether to compare against LAPACK's LU factorization "
 		  "(expert driver).  If --equilibration, then use "
 		  "equilibration in LAPACK too.");
+  cmdp.setOption ("custom-bicgstab", "no-custom-bicgstab",
+                  &args.useCustomBicgstab,
+                  "Whether to compare against a hand-rolled BiCGSTAB "
+		  "implementation.");
 
   auto result = cmdp.parse (argc, argv);
   return result == Teuchos::CommandLineProcessor::PARSE_SUCCESSFUL;
@@ -1553,6 +1694,7 @@ main (int argc, char* argv[])
 	       << explicitResidualNorms[j]
 	       << ", ||B||_2 = " << B_norms[j] << endl;
 	}
+	cout << endl;
       }
     }
     
@@ -1560,6 +1702,30 @@ main (int argc, char* argv[])
     if (lapackSolveOk != 1) {
       if (comm->getRank () == 0) {
 	cerr << "LAPACK solve FAILED!" << endl;
+      }
+    }
+  }
+
+  if (args.useCustomBicgstab) {
+    for (double convTol : convergenceToleranceValues) {
+      for (int maxIters : maxIterValues) {
+	MV X_copy (*X, Teuchos::Copy);
+	const Tpetra::Operator<>* M = nullptr;
+	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
+	auto result = bicgstab (X_copy, A_ref, M, *B, maxIters, convTol);
+
+	using std::cout;
+	using std::endl;
+	cout << "Solver:" << endl
+	     << "  Solver type: Custom BiCGSTAB" << endl
+	     << "  Preconditioner type: NONE" << endl
+	     << "  Convergence tolerance: " << convTol << endl
+	     << "  Maximum number of iterations: " << maxIters << endl
+	     << "Results:" << endl
+	     << "  Converged: " << std::get<2> (result) << endl
+	     << "  Number of iterations: " << std::get<1> (result) << endl
+	     << "  Achieved tolerance: " << std::get<0> (result) << endl
+	     << endl;
       }
     }
   }
