@@ -220,6 +220,61 @@ solveLeastSquaresProblemAndReport (DenseMatrixType A,
 }
 
 
+template<class DenseMatrixType>
+void
+findEigenvaluesAndReport (DenseMatrixType A)
+{
+  using std::cerr;
+  using std::cout;
+  using std::endl;
+  
+  const int numRows = int (A.extent (0));
+  const int numCols = int (A.extent (1));
+  const int N = std::min (numRows, numCols);
+
+  DenseMatrixType A_copy ("A_copy", numRows, numCols);
+  Kokkos::deep_copy (A_copy, A);
+  
+  const int LDA = (numRows == 0) ? 1 : int (A_copy.stride (1));
+
+  std::vector<double> realParts (N);
+  std::vector<double> imagParts (N);
+  std::vector<double> WORK (1);  
+
+  int INFO = 0;
+  int LWORK = -1; // workspace query
+  Teuchos::LAPACK<int, double> lapack;  
+  lapack.GEEV ('N', 'N', N, A_copy.data (), LDA, realParts.data (),
+	       imagParts.data (), nullptr, 1, nullptr, 1, WORK.data (),
+	       LWORK, nullptr, &INFO);
+  if (INFO != 0) {
+    cerr << "DGELSS returned INFO = " << INFO << " != 0." << endl;
+    return;
+  }
+  LWORK = int (WORK[0]);
+  if (LWORK < 0) {
+    cerr << "DGEEV reported LWORK = " << LWORK << " < 0." << endl;
+    return;
+  }
+  WORK.resize (LWORK);
+
+  cout << "Solver:" << endl
+       << "  Solver type: LAPACK's DGEEV" << endl;
+  lapack.GEEV ('N', 'N', N, A_copy.data (), LDA, realParts.data (),
+	       imagParts.data (), nullptr, 1, nullptr, 1, WORK.data (),
+	       LWORK, nullptr, &INFO);
+
+  cout << "Results:" << endl
+       << "  INFO: " << INFO << endl
+       << "  Eigenvalues: ";
+  for (int k = 0; k < N; ++k) {
+    cout << "(" << realParts[k] << "," << imagParts[k] << ")";
+    if (k + 1 < N) {
+      cout << ", ";
+    }
+  }
+  cout << endl;
+}
   
 
 template<class SC, class LO, class GO, class NT>
@@ -1421,6 +1476,7 @@ main (int argc, char* argv[])
 	lapackSolveOk = 0;
       }
       else {
+	findEigenvaluesAndReport (A_lapack);	
 	solveLeastSquaresProblemAndReport (A_lapack, B_lapack);
 	
 	Teuchos::LAPACK<int, double> lapack;
