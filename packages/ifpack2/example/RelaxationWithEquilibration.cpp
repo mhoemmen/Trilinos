@@ -97,19 +97,30 @@ bicgstab (MV& x,
   MV t (r.getMap (), r.getNumVectors ());    
 
   for (iter = 1; iter <= max_it; ++iter) {
+    std::cerr << ">>> Hand-rolled BiCGSTAB: iter = " << (iter - 1) << std::endl;
+    
     rho = dot (r_tld, r); // ( r_tld'*r );
+    std::cerr << "  rho = " << rho << std::endl;
+
     if (rho == 0.0) {
       return {error, iter, false};
     }
 
     if (iter > 1) {
       beta = (rho / rho_1) * (alpha / omega);
+      std::cerr << "  beta = " << beta << std::endl;      
       p.update (-omega, v, 0.0); // p = p - omega*v
       p.update (1.0, r, beta, p, 0.0); // p = r + beta*( p - omega*v );
     }
     else {
-      p = r;
+      p = r; // oddly enough, this is actually what we want when there
+	     // is no preconditioner.  If we do deep_copy instead,
+	     // then the solver fails to converge.  I'm not sure how
+	     // this works, given the formulae above.
+      //Tpetra::deep_copy (p, r);
     }
+
+    std::cerr << "  ||P_0||_2 = " << norm (p) << std::endl;
 
     if (M != nullptr) {
       M->apply (p, p_hat);
@@ -120,7 +131,13 @@ bicgstab (MV& x,
 
     A.apply (p_hat, v);
 
+    std::cerr << "  ||Y_0||_2 = " << norm (p_hat) << std::endl;
+    std::cerr << "  ||V_0||_2 = " << norm (v) << std::endl;
+    std::cerr << "  ||Rhat_0||_2 = " << norm (r_tld) << std::endl;        
+    std::cerr << "  rhatV = " << dot (r_tld, v) << std::endl;        
+
     alpha = rho / dot (r_tld, v);
+    std::cerr << "  alpha = " << alpha << std::endl;    
     s.update (1.0, r, -alpha, v, 0.0); // s = r - alpha*v;
     if (norm(s) < tol) {
       // x = x + alpha*p_hat;
@@ -137,6 +154,7 @@ bicgstab (MV& x,
 
     A.apply (s_hat, t);
     omega = dot (t, s) / dot (t, t);
+    std::cerr << "  omega = " << omega << std::endl;
 
     // x = x + alpha*p_hat + omega*s_hat;
     x.update (alpha, p_hat, omega, s_hat, 1.0); 
