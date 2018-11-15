@@ -299,7 +299,7 @@ bicgstab_aztecoo (MV& x,
   }
   
   for (iter = 1; iter <= max_it; ++iter) {
-    std::cerr << ">>> AztecOO-ish BiCGSTAB: iter = " << (iter - 1) << std::endl;
+    //std::cerr << ">>> AztecOO-ish BiCGSTAB: iter = " << (iter - 1) << std::endl;
     if (brkdown_will_occur) {
       residual (v, b, A, x); // v = b - A*x
       actual_residual = norm (v);
@@ -388,6 +388,102 @@ bicgstab_aztecoo (MV& x,
   }
 
   return {scaled_r_norm, iter, scaled_r_norm <= tol};
+}
+
+template<class MV, class OP>
+std::tuple<typename MV::mag_type, int, bool>
+bicgstab_paper (MV& x,
+		const OP& A,
+		const OP* const /* M */,
+		const MV& b,
+		const int max_it,
+		const typename MV::mag_type tol)
+{
+  using dot_type = typename MV::dot_type;
+  using mag_type = typename MV::mag_type;
+  using STS = Teuchos::ScalarTraits<dot_type>;
+  using STM = Teuchos::ScalarTraits<mag_type>;
+
+  x.putScalar (STS::zero ()); // just in case
+
+  const mag_type b_norm = norm (b);
+  if (b_norm == STS::zero ()) {
+    x.putScalar (STS::zero ());
+    return {STM::zero (), 0, true};
+  }
+  dot_type rho_cur = STS::one ();
+  dot_type rho_prv = STS::one ();  
+  dot_type alpha = STS::one ();
+  dot_type beta = STS::one ();  
+  dot_type omega = STS::one ();  
+  
+  MV r (b.getMap (), b.getNumVectors (), false);
+  residual (r, b, A, x);
+
+  mag_type r_norm = norm (r);
+  mag_type scaled_r_norm = r_norm / b_norm;
+  if (r_norm / b_norm <= tol) {
+    return {scaled_r_norm, 0, true};
+  }
+  MV r_hat (r, Teuchos::Copy);
+
+  MV v (b.getMap (), b.getNumVectors ());
+  MV p (b.getMap (), b.getNumVectors ());
+  MV s (b.getMap (), b.getNumVectors ());
+  MV t (b.getMap (), b.getNumVectors ());
+  MV tmp (b.getMap (), b.getNumVectors ());
+  
+  for (int iter = 1; iter <= max_it; ++iter) {
+    rho_cur = dot (r_hat, r);
+    beta = (rho_cur / rho_prv) * (alpha / omega);
+
+    // p = r + beta(p - omega*v); v is 0 on 1st iter
+    if (iter > 1) {
+      p.update (-omega, v, STS::one ()); // p = -omega*v + p
+    }
+    p.update (STS::one (), r, beta); // p = r + beta*p
+
+    A.apply (p, v);
+
+    alpha = rho_cur / dot (r_hat, v);
+
+    // s = r - alpha*v
+    Tpetra::deep_copy (s, r);
+    s.update (-alpha, v, STS::one ()); // s = -alpha*v + s
+
+    A.apply (s, t);
+
+    omega = dot (t, s) / dot (t, t);
+
+    // x = x + alpha*p + omega*s
+    x.update (alpha, p, STS::one ()); // x = alpha*p + x
+    x.update (omega, s, STS::one ()); // x = omega*s + s
+
+    // r = s - omega*t
+    Tpetra::deep_copy (r, s);
+    r.update (-omega, t, STS::one ()); // r = -omega*t + r
+    
+    // check convergence
+    r_norm = norm (r);
+    scaled_r_norm = r_norm / b_norm;
+    if (scaled_r_norm <= tol) {
+      residual (tmp, b, A, x);
+      const mag_type actual_r_norm = norm (tmp);
+      const mag_type actual_scaled_r_norm = actual_r_norm / b_norm;
+      std::cerr << "!!! Actual scaled r norm: " << actual_scaled_r_norm << std::endl;
+      return {scaled_r_norm, iter, true};
+    }
+
+    rho_prv = rho_cur; // don't forget this!
+  }
+
+  {
+    residual (tmp, b, A, x);
+    const mag_type actual_r_norm = norm (tmp);
+    const mag_type actual_scaled_r_norm = actual_r_norm / b_norm;
+    std::cerr << "!!! Actual scaled r norm: " << actual_scaled_r_norm << std::endl;
+  }
+  return {scaled_r_norm, max_it, scaled_r_norm <= tol};
 }
 
 template<class SC, class LO, class GO, class NT>
@@ -1940,9 +2036,10 @@ main (int argc, char* argv[])
     for (double convTol : convergenceToleranceValues) {
       for (int maxIters : maxIterValues) {
 	MV X_copy (*X, Teuchos::Copy);
+	MV B_copy (*B, Teuchos::Copy);
 	const Tpetra::Operator<>* M = nullptr;
 	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
-	auto result = bicgstab (X_copy, A_ref, M, *B, maxIters, convTol);
+	auto result = bicgstab (X_copy, A_ref, M, B_copy, maxIters, convTol);
 
 	using std::cout;
 	using std::endl;
@@ -1964,14 +2061,40 @@ main (int argc, char* argv[])
     for (double convTol : convergenceToleranceValues) {
       for (int maxIters : maxIterValues) {
 	MV X_copy (*X, Teuchos::Copy);
+	MV B_copy (*B, Teuchos::Copy);
 	const Tpetra::Operator<>* M = nullptr;
 	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
-	auto result = bicgstab_aztecoo (X_copy, A_ref, M, *B, maxIters, convTol);
+	auto result = bicgstab_aztecoo (X_copy, A_ref, M, B_copy, maxIters, convTol);
 
 	using std::cout;
 	using std::endl;
 	cout << "Solver:" << endl
 	     << "  Solver type: AztecOO-imitating custom BiCGSTAB" << endl
+	     << "  Preconditioner type: NONE" << endl
+	     << "  Convergence tolerance: " << convTol << endl
+	     << "  Maximum number of iterations: " << maxIters << endl
+	     << "Results:" << endl
+	     << "  Converged: " << std::get<2> (result) << endl
+	     << "  Number of iterations: " << std::get<1> (result) << endl
+	     << "  Achieved tolerance: " << std::get<0> (result) << endl
+	     << endl;
+      }
+    }
+  }
+
+  if (args.useCustomBicgstab) {
+    for (double convTol : convergenceToleranceValues) {
+      for (int maxIters : maxIterValues) {
+	MV X_copy (*X, Teuchos::Copy);
+	MV B_copy (*B, Teuchos::Copy);	
+	const Tpetra::Operator<>* M = nullptr;
+	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
+	auto result = bicgstab_paper (X_copy, A_ref, M, B_copy, maxIters, convTol);
+
+	using std::cout;
+	using std::endl;
+	cout << "Solver:" << endl
+	     << "  Solver type: Original paper BiCGSTAB" << endl
 	     << "  Preconditioner type: NONE" << endl
 	     << "  Convergence tolerance: " << convTol << endl
 	     << "  Maximum number of iterations: " << maxIters << endl
