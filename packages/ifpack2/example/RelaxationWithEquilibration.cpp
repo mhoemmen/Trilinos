@@ -63,7 +63,6 @@ bicgstab (MV& x,
   using mag_type = typename MV::mag_type;  
   
   int iter = 0;
-  int flag = 0;
 
   mag_type bnrm2 = norm (b);
   if (bnrm2 == STM::zero ()) {
@@ -108,9 +107,53 @@ bicgstab (MV& x,
 
     if (iter > 1) {
       beta = (rho / rho_1) * (alpha / omega);
-      std::cerr << "  beta = " << beta << std::endl;      
+      std::cerr << "  beta = " << beta << std::endl;
+
       p.update (-omega, v, 0.0); // p = p - omega*v
       p.update (1.0, r, beta, p, 0.0); // p = r + beta*( p - omega*v );
+    }
+    else {
+      p = r;
+    }
+    
+#if 0
+    if (iter > 1) {
+      beta = (rho / rho_1) * (alpha / omega);
+      std::cerr << "  beta = " << beta << std::endl;
+
+      p.update (-omega, v, 1.0); // p = p - omega*v
+      p.update (1.0, r, beta, p, 0.0); // p = r + beta*( p - omega*v );
+    }
+    else {
+      Tpetra::deep_copy (p, r);
+    }
+#endif // 0
+
+#if 0
+    if (iter > 1) {
+      beta = (rho / rho_1) * (alpha / omega);
+      std::cerr << "  beta = " << beta << std::endl;
+      if (false) { // NOTE (mfh 13 Nov 2018) weirdly, this branch works
+	//p.update (-omega, v, 0.0); // p = p - omega*v
+	p.update (-omega, v, 0.0); // p = p - omega*v
+	p.update (1.0, r, beta, p, 0.0); // p = r + beta*( p - omega*v );
+      }
+      else if (false) { // NOTE (mfh 13 Nov 2018) does NOT work
+	MV p_tmp (p, Teuchos::Copy);
+	p_tmp.update (-omega, v, 0.0);
+	p.update (1.0, r, beta, p_tmp, 0.0);
+      }
+      else if (false) { // NOTE (mfh 13 Nov 2018) does NOT work
+	MV p_tmp (p, Teuchos::Copy);
+	p_tmp.update (-omega, v, 1.0);
+	p.update (1.0, r, beta, p_tmp, 0.0);
+      }
+      else { // NOTE (mfh 13 Nov 2018) does NOT work
+	MV p_tmp (p, Teuchos::Copy);
+	p_tmp.update (-omega, v, 0.0);
+	p.putScalar (0.0);
+	p.update (1.0, r, beta, p_tmp, 0.0);
+      }
     }
     else {
       p = r; // oddly enough, this is actually what we want when there
@@ -119,6 +162,7 @@ bicgstab (MV& x,
 	     // this works, given the formulae above.
       //Tpetra::deep_copy (p, r);
     }
+#endif // 0
 
     std::cerr << "  ||P_0||_2 = " << norm (p) << std::endl;
 
@@ -176,6 +220,174 @@ bicgstab (MV& x,
   else {
     return {error, iter, false};
   }
+}
+
+template<class MV>
+bool
+AZ_breakdown_f (MV& v, MV& w, const typename MV::dot_type v_dot_w)
+{
+  using STS = Teuchos::ScalarTraits<typename MV::scalar_type>;
+  
+  const auto v_norm = norm (v);
+  const auto w_norm = norm (w);
+  return STS::magnitude (v_dot_w) <= 100.0 * v_norm * w_norm * STS::eps ();
+}
+
+template<class MV, class OP>
+std::tuple<typename MV::mag_type, int, bool>
+bicgstab_aztecoo (MV& x,
+		  const OP& A,
+		  const OP* const M,
+		  const MV& b,
+		  const int max_it,
+		  const typename MV::mag_type tol)
+{
+  using STS = Teuchos::ScalarTraits<typename MV::scalar_type>;
+  using STM = Teuchos::ScalarTraits<typename MV::mag_type>;
+  using dot_type = typename MV::dot_type;
+  using mag_type = typename MV::mag_type;  
+  
+  int iter = 0;
+
+  bool brkdown_will_occur = false;
+  dot_type alpha = STS::one ();
+  dot_type beta = STS::zero ();
+  mag_type true_scaled_r = STM::zero ();
+  dot_type omega = STS::one ();
+  dot_type rhonm1 = STS::one ();
+  dot_type rhon = STS::zero ();
+  dot_type sigma = STS::zero ();
+  mag_type brkdown_tol = STS::eps ();
+  mag_type scaled_r_norm = -STM::one ();
+  mag_type actual_residual = -STM::one ();
+  mag_type rec_residual = -STM::one ();
+  dot_type dtemp = STS::zero ();
+
+  MV phat (b.getMap (), b.getNumVectors (), false);  
+  MV p (b.getMap (), b.getNumVectors (), false);
+  MV shat (b.getMap (), b.getNumVectors (), false);
+  MV s (b.getMap (), b.getNumVectors (), false);
+  MV r (b.getMap (), b.getNumVectors (), false);
+  MV r_tld (b.getMap (), b.getNumVectors (), false);
+  MV v (b.getMap (), b.getNumVectors (), false);
+
+  residual (r, b, A, x); // r = b - A*x;
+
+  // "v, p <- 0"
+  v.putScalar (STS::zero ());
+  p.putScalar (STS::zero ());
+
+  // "set rtilda" [sic]
+  constexpr int AZ_aux_vec = 0; // AZ_resid = 0; AZ_rand (?) = 1
+  constexpr int AZ_resid = 0;
+  if (AZ_aux_vec == AZ_resid) {
+    Tpetra::deep_copy (r_tld, r);
+  }
+  else {
+    r_tld.randomize ();
+  }
+
+  // AZ_compute_global_scalars does all this, neatly bundled into a
+  // single all-reduce.
+  const mag_type b_norm = norm (b);
+  actual_residual = norm (r);  
+  rec_residual = actual_residual;
+  scaled_r_norm = rec_residual / b_norm;
+  rhon = dot (r_tld, r);
+  if (scaled_r_norm <= tol) {
+    return {scaled_r_norm, 0, true};
+  }
+  
+  for (iter = 1; iter <= max_it; ++iter) {
+    std::cerr << ">>> AztecOO-ish BiCGSTAB: iter = " << (iter - 1) << std::endl;
+    if (brkdown_will_occur) {
+      residual (v, b, A, x); // v = b - A*x
+      actual_residual = norm (v);
+      scaled_r_norm = actual_residual / b_norm;
+      std::cerr << "Uh oh, breakdown" << std::endl;
+      return {scaled_r_norm, iter, false};
+    }
+    
+    beta = (rhon / rhonm1) * (alpha / omega);
+
+    if (STS::magnitude (rhon) < brkdown_tol) {
+      if (AZ_breakdown_f(r, r_tld, rhon)) {
+	brkdown_will_occur = true;
+      }
+      else {
+	brkdown_tol = 0.1 * STS::magnitude (rhon);
+      }
+    }      
+
+    rhonm1 = rhon;
+
+    /* p    = r + beta*(p - omega*v)       */
+    /* phat = M^-1 p                       */
+    /* v    = A phat                       */
+    
+    dtemp = beta * omega;
+    p.update (STS::one (), r, -dtemp, v, beta);
+    Tpetra::deep_copy (phat, p);
+
+    if (M != nullptr) {
+      M->apply (p, phat);
+    }
+    A.apply (phat, v);
+    sigma = dot (r_tld, v);
+
+    if (STS::magnitude (sigma) < brkdown_tol) {
+      if (AZ_breakdown_f(r_tld, v, sigma)) { // actual break down
+	residual (v, b, A, x); // v = b - A*x;
+	actual_residual = norm (v);
+	scaled_r_norm = actual_residual / b_norm;
+	return {scaled_r_norm, iter, false};
+      }
+      else {
+	brkdown_tol = 0.1 * STS::magnitude (sigma);
+      }
+    }
+
+    alpha = rhon / sigma;
+
+    s.update (STS::one (), r, -alpha, v, STS::zero ());
+    Tpetra::deep_copy (shat, s);
+
+    if (M != nullptr) {
+      M->apply (s, shat);
+    }
+    A.apply (shat, r);
+
+    /* omega = (t,s)/(t,t) with r = t */
+
+    const auto dot_vec_0 = dot (r, s);
+    const auto dot_vec_1 = dot (r, r);
+    if (STM::magnitude (dot_vec_1) < tol) {
+      omega = STS::zero ();
+      brkdown_will_occur = true;
+    }
+    else {
+      omega = dot_vec_0 / dot_vec_1;
+    }
+
+    /* x = x + alpha*phat + omega*shat */
+    /* r = s - omega*r */
+
+    // DAXPY_F77(&N, &alpha, phat, &one, x, &one);
+    // DAXPY_F77(&N, &omega, shat, &one, x, &one);
+    x.update (alpha, phat, omega, shat, STS::one ());
+    
+    // for (i = 0; i < N; i++) r[i] = s[i] - omega * r[i];
+    r.update (STS::one (), s, -omega);
+
+    rec_residual = norm (r);
+    scaled_r_norm = rec_residual / b_norm;
+    rhon = dot (r, r_tld);
+    if (scaled_r_norm <= tol) {
+      return {scaled_r_norm, 0, true};
+    }
+  }
+
+  return {scaled_r_norm, iter, scaled_r_norm <= tol};
 }
 
 template<class SC, class LO, class GO, class NT>
@@ -1748,6 +1960,30 @@ main (int argc, char* argv[])
     }
   }
 
+  if (args.useCustomBicgstab) {
+    for (double convTol : convergenceToleranceValues) {
+      for (int maxIters : maxIterValues) {
+	MV X_copy (*X, Teuchos::Copy);
+	const Tpetra::Operator<>* M = nullptr;
+	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
+	auto result = bicgstab_aztecoo (X_copy, A_ref, M, *B, maxIters, convTol);
+
+	using std::cout;
+	using std::endl;
+	cout << "Solver:" << endl
+	     << "  Solver type: AztecOO-imitating custom BiCGSTAB" << endl
+	     << "  Preconditioner type: NONE" << endl
+	     << "  Convergence tolerance: " << convTol << endl
+	     << "  Maximum number of iterations: " << maxIters << endl
+	     << "Results:" << endl
+	     << "  Converged: " << std::get<2> (result) << endl
+	     << "  Number of iterations: " << std::get<1> (result) << endl
+	     << "  Achieved tolerance: " << std::get<0> (result) << endl
+	     << endl;
+      }
+    }
+  }
+  
   // Create the solver.
   BelosIfpack2Solver<crs_matrix_type> solver (A);
 
