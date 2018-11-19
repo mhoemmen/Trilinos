@@ -13,10 +13,26 @@
 #include "Teuchos_CommHelpers.hpp"
 #include "Teuchos_ParameterList.hpp"
 #include "Teuchos_LAPACK.hpp"
-//#include "Teuchos_ParameterXMLFileReader.hpp"
 #include "KokkosBlas1_abs.hpp"
 #include "KokkosBlas1_nrm2.hpp"
 #include "KokkosBlas3_gemm.hpp"
+
+#if defined(HAVE_IFPACK2_AZTECOO) && defined(HAVE_IFPACK2_EPETRA)
+#  include "AztecOO.h"
+#  include "Epetra_Comm.h"
+#  if defined(HAVE_MPI)
+#    include "mpi.h"
+#    include "Epetra_MpiComm.h"
+#  else
+#    include "Epetra_SerialComm.h"
+#  endif
+#  include "Epetra_CrsMatrix.h"
+#  include "Epetra_Map.h"
+#  include "Epetra_Vector.h"
+#  if defined(HAVE_TPETRACORE_MPI)
+#    include "Tpetra_Details_extractMpiCommFromTeuchos.hpp"
+#  endif // HAVE_TPETRACORE_MPI
+#endif // defined(HAVE_IFPACK2_AZTECOO) && defined(HAVE_IFPACK2_EPETRA)
 
 #include <algorithm> // std::transform
 #include <cctype> // std::toupper
@@ -24,6 +40,268 @@
 #include <functional>
 
 namespace { // (anonymous)
+
+// I know it looks weird to use a unique_ptr here, but Epetra_Comm
+// actually has its own shallow-copy semantics, so we don't need
+// shared_ptr here.
+std::unique_ptr<Epetra_Comm>
+tpetraToEpetraComm (const Teuchos::Comm<int>& tpetraComm)
+{
+#if defined(HAVE_TPETRACORE_MPI) && ! defined(HAVE_MPI)
+#  error "MPI is enabled in Tpetra, but is not enabled in Epetra."
+#elif ! defined(HAVE_TPETRACORE_MPI) && defined(HAVE_MPI)
+#  error "MPI is not enabled in Tpetra, but is enabled in Epetra."
+#endif
+
+#if defined(HAVE_TPETRACORE_MPI) && defined(HAVE_MPI)
+  MPI_Comm rawMpiComm = Tpetra::Details::extractMpiCommFromTeuchos (tpetraComm);
+  std::unique_ptr<Epetra_MpiComm> epetraMpiComm (new Epetra_MpiComm (rawMpiComm));
+  return epetraMpiComm;
+#else
+  std::unique_ptr<Epetra_SerialComm> epetraSerialComm (new Epetra_SerialComm);
+  return epetraSerialComm;
+#endif
+}
+
+template<class LO, class GO, class NT>
+Epetra_Map
+tpetraToEpetraMap (const Tpetra::Map<LO, GO, NT>& map_t,
+		   const Epetra_Comm& comm_e)
+{
+  const int gblNumInds = static_cast<int> (map_t.getGlobalNumElements ());
+  const int lclNumInds = static_cast<int> (map_t.getNodeNumElements ());
+  const int indexBase = static_cast<int> (map_t.getIndexBase ());
+  
+  if (map_t.isContiguous ()) {
+    if (map_t.isUniform ()) {
+      return Epetra_Map (gblNumInds, indexBase, comm_e);
+    }
+    else {
+      return Epetra_Map (gblNumInds, lclNumInds, indexBase, comm_e);
+    }
+  }
+  else {
+    auto myGblInds_d = map_t.getMyGlobalIndices ();
+    typename decltype(myGblInds_d)::HostMirror::non_const_type
+      myGblInds_h ("myGblInds_h", myGblInds_d.extent (0));
+    Kokkos::deep_copy (myGblInds_h, myGblInds_d);
+    Kokkos::fence ();
+    return Epetra_Map (gblNumInds, lclNumInds, myGblInds_h.data (), indexBase, comm_e);
+  }
+}
+
+template<class LO, class GO, class NT>
+Epetra_Vector
+tpetraToEpetraVector (const Tpetra::MultiVector<double, LO, GO, NT>& X_t,
+		      const Epetra_Map& map_e)
+{
+  TEUCHOS_TEST_FOR_EXCEPTION
+    (X_t.getNumVectors () != std::size_t (1), std::invalid_argument,
+     "This function requires that X_t have only one column.");
+
+  const int lclNumRows = map_e.NumMyElements ();
+  TEUCHOS_TEST_FOR_EXCEPTION
+    (lclNumRows != static_cast<int> (X_t.getLocalLength ()),
+     std::runtime_error, "X_t.getLocalLength() = " << X_t.getLocalLength ()
+     << " != map_e.NumMyElements() = " << lclNumRows << ".");
+  
+  Epetra_Vector X_e (map_e);
+  double* X_e_lcl_raw = nullptr;
+  const int errCode = X_e.ExtractView (&X_e_lcl_raw);
+  TEUCHOS_TEST_FOR_EXCEPTION
+    (errCode != 0, std::runtime_error, "Epetra_Vector::ExtractView "
+     "failed with error code " << errCode << " != 0.");
+  TEUCHOS_TEST_FOR_EXCEPTION
+    (X_e_lcl_raw == nullptr && lclNumRows != 0, std::runtime_error,
+     "Epetra_Vector::ExtractView returned 0, but output a null pointer, when "
+     "map_e has nonzero indices on the calling process.");
+
+  using MV = Tpetra::MultiVector<double, LO, GO, NT>;
+  using device_type = typename MV::device_type;
+  using memory_space = typename device_type::memory_space;
+  using host_execution_space = typename Kokkos::View<double*, device_type>::HostMirror::execution_space;
+  using host_memory_space = Kokkos::HostSpace;
+  using host_device_type = Kokkos::Device<host_execution_space, host_memory_space>;
+  Kokkos::View<double*, host_device_type> X_e_lcl (X_e_lcl_raw, lclNumRows);
+
+  const_cast<MV&> (X_t).template sync<memory_space> ();
+  auto X_t_lcl_2d = X_t.template getLocalView<memory_space> ();
+  auto X_t_lcl = Kokkos::subview (X_t_lcl_2d, Kokkos::ALL (), 0);
+  Kokkos::deep_copy (X_e_lcl, X_t_lcl);
+
+  return X_e;
+}
+
+// template<class LO, class GO, class NT>
+// Epetra_Vector
+// tpetraToEpetraVector (const Tpetra::Vector<double, LO, GO, NT>& X_t)
+// {
+//   return tpetraToEpetraVector (X_t, tpetraToEpetraMap (* (X_t.getMap ())));
+// }
+
+template<class LO, class GO, class NT>
+Epetra_CrsMatrix
+tpetraToEpetraCrsMatrix (const Tpetra::CrsMatrix<double, LO, GO, NT>& A_t,
+			 const Epetra_Map& rowMap,
+			 const Epetra_Map& colMap,
+			 const Epetra_Map& domMap,
+			 const Epetra_Map& ranMap)
+{
+  static_assert (std::is_same<LO, int>::value, "This code only works when LO = int.");
+  const LO lclNumRows = rowMap.NumMyElements ();
+  
+  std::vector<int> numEntPerRow (lclNumRows);
+  for (LO lclRow = 0; lclRow < lclNumRows; ++lclRow) {
+    const size_t numEnt = A_t.getNumEntriesInLocalRow (lclRow);
+    numEntPerRow[lclRow] = static_cast<int> (numEnt);
+  }
+  // We can use static profile, since we know the structure in advance.
+  Epetra_CrsMatrix A_e (Copy, rowMap, colMap, numEntPerRow.data (), true);
+
+  Teuchos::Array<LO> lclColIndsBuf (A_t.getNodeMaxNumRowEntries ());
+  Teuchos::Array<double> valsBuf (A_t.getNodeMaxNumRowEntries ());
+  int lclErrCode = 0;
+  for (LO lclRow = 0; lclRow < lclNumRows; ++lclRow) {
+    size_t numEnt = A_t.getNumEntriesInLocalRow (lclRow);
+    Teuchos::ArrayView<LO> lclColInds = lclColIndsBuf (0, numEnt);
+    Teuchos::ArrayView<double> vals = valsBuf (0, numEnt);
+
+    A_t.getLocalRowCopy (static_cast<LO> (lclRow), lclColInds, vals, numEnt);
+    lclErrCode = A_e.InsertMyValues (lclRow, static_cast<int> (numEnt),
+      vals.getRawPtr (), lclColInds.getRawPtr ());
+    if (lclErrCode != 0) {
+      break;
+    }
+  }
+
+  if (lclErrCode > 0) {
+    lclErrCode = -lclErrCode; // make sure that REDUCE_MIN works
+  }
+  using Teuchos::outArg;  
+  using Teuchos::reduceAll;
+  using Teuchos::REDUCE_MIN;
+  int gblErrCode = 0; // output argument
+  reduceAll<int, int> (* (A_t.getMap ()->getComm ()), REDUCE_MIN,
+		       lclErrCode, outArg (gblErrCode));
+  TEUCHOS_TEST_FOR_EXCEPTION
+    (gblErrCode != 0, std::runtime_error, "tpetraToEpetraCrsMatrix: "
+     "InsertMyValues failed on some process!");
+
+  try {
+    lclErrCode = A_e.FillComplete (domMap, ranMap);
+  }
+  catch (...) {
+    // Epetra likes to throw integers, not std::exception subclasses.
+    lclErrCode = -1;
+  }
+  if (lclErrCode > 0) {
+    lclErrCode = -lclErrCode; // make sure that REDUCE_MIN works
+  }
+  reduceAll<int, int> (* (A_t.getMap ()->getComm ()), REDUCE_MIN,
+		       lclErrCode, outArg (gblErrCode));
+  TEUCHOS_TEST_FOR_EXCEPTION
+    (gblErrCode != 0, std::runtime_error, "tpetraToEpetraCrsMatrix: "
+     "Epetra_CrsMatrix::FillComplete failed on some process!");
+
+  return A_e;
+}
+
+// Return Epetra versions of (A, x, b).
+template<class LO, class GO, class NT>
+std::tuple<Epetra_CrsMatrix, Epetra_Vector, Epetra_Vector>
+tpetraToEpetraLinearSystem (const Tpetra::CrsMatrix<double, LO, GO, NT>& A_t,
+			    const Tpetra::MultiVector<double, LO, GO, NT>& x_t,
+			    const Tpetra::MultiVector<double, LO, GO, NT>& b_t)
+{
+  TEUCHOS_TEST_FOR_EXCEPTION
+    (! A_t.isFillComplete (), std::invalid_argument,
+     "The input matrix A must be fill complete.");
+
+  Teuchos::RCP<const Teuchos::Comm<int>> comm_t =
+    A_t.getMap ().is_null () ? Teuchos::null : A_t.getMap ()->getComm ();
+  TEUCHOS_TEST_FOR_EXCEPTION
+    (comm_t.is_null (), std::runtime_error, "Tpetra's Comm is null.");
+
+  const bool domMapsSame = A_t.getDomainMap ()->isSameAs (* (x_t.getMap ()));
+  const bool ranMapsSame = A_t.getRangeMap ()->isSameAs (* (b_t.getMap ()));
+  TEUCHOS_TEST_FOR_EXCEPTION
+    (! domMapsSame, std::invalid_argument, "Domain Map of input matrix A "
+     "is not the same as the Map of input vector x.");
+  TEUCHOS_TEST_FOR_EXCEPTION
+    (! ranMapsSame, std::invalid_argument, "Range Map of input matrix A "
+     "is not the same as the Map of input vector b.");    
+
+  std::unique_ptr<Epetra_Comm> comm_e = tpetraToEpetraComm (*comm_t);
+
+  Epetra_Map rowMap_e = tpetraToEpetraMap (* (A_t.getRowMap ()), *comm_e);
+  Epetra_Map colMap_e = tpetraToEpetraMap (* (A_t.getColMap ()), *comm_e);
+  Epetra_Map domMap_e = tpetraToEpetraMap (* (A_t.getDomainMap ()), *comm_e);
+  Epetra_Map ranMap_e = tpetraToEpetraMap (* (A_t.getRangeMap ()), *comm_e);
+
+  Epetra_CrsMatrix A_e = tpetraToEpetraCrsMatrix (A_t, rowMap_e, colMap_e,
+						  domMap_e, ranMap_e);
+  Epetra_Vector x_e = tpetraToEpetraVector (x_t, domMap_e);
+  Epetra_Vector b_e = tpetraToEpetraVector (b_t, ranMap_e);
+  return {A_e, x_e, b_e};
+}
+
+std::tuple<double, int, bool>
+solveEpetraLinearSystemWithAztecOO (std::tuple<Epetra_CrsMatrix, Epetra_Vector, Epetra_Vector>& sys,
+				    const double convTol,
+				    const int maxNumIters)
+{
+  using std::get;
+  Epetra_CrsMatrix& A = get<0> (sys);
+  Epetra_Vector& x = get<1> (sys);
+  Epetra_Vector& b = get<2> (sys);
+  Epetra_LinearProblem problem (&A, &x, &b);
+  AztecOO solver (problem);
+  //(void) solver.SetAztecOption (AZ_precond, AZ_sym_GS);
+  (void) solver.SetAztecOption (AZ_precond, AZ_none);
+  (void) solver.SetAztecOption (AZ_solver, AZ_bicgstab);
+  const int errCode = solver.Iterate (maxNumIters, convTol);
+
+  bool success = true;
+  if (errCode == 0) {
+    success = true;
+  }
+  else if (errCode == 1) {
+    success = false; // reached max number of iterations
+  }
+  else { // negative means error code
+    success = false;
+  }
+  
+  return {solver.ScaledResidual (), solver.NumIters (), success};
+}
+
+template<class MV>
+typename MV::dot_type accurate_dot (const MV& X, const MV& Y)
+{
+  using LO = typename MV::local_ordinal_type;
+  using DMS = typename MV::device_type::memory_space;
+  using dot_type = typename MV::dot_type;
+
+  const LO lclNumRows = X.getLocalLength ();
+  const_cast<MV&> (X).template sync<Kokkos::HostSpace> ();
+  auto X_lcl_2d = X.template getLocalView<Kokkos::HostSpace> ();
+  auto X_lcl = Kokkos::subview (X_lcl_2d, Kokkos::ALL (), 0);
+  const_cast<MV&> (Y).template sync<Kokkos::HostSpace> ();
+  auto Y_lcl_2d = Y.template getLocalView<Kokkos::HostSpace> ();
+  auto Y_lcl = Kokkos::subview (Y_lcl_2d, Kokkos::ALL (), 0);
+
+  long double sum = 0.0;
+  for (LO i = 0; i < lclNumRows; ++i) {
+    const long double x_i = X_lcl (i);
+    const long double y_i = Y_lcl (i);
+    sum = std::fma (x_i, y_i, sum);
+  }
+
+  const_cast<MV&> (X).template sync<DMS> ();
+  const_cast<MV&> (Y).template sync<DMS> ();
+
+  return dot_type (sum);
+}
 
 template<class MV>
 auto norm (const MV& X) -> decltype (X.getVector (0)->norm2 ())
@@ -43,9 +321,11 @@ void residual (MV& R, const MV& B, const OP& A, const MV& X)
 template<class MV>
 typename MV::dot_type dot (const MV& X, const MV& Y)
 {
-  Teuchos::Array<typename MV::dot_type> dots (X.getNumVectors ());
-  Y.dot (X, dots ());
-  return dots[0];
+  // Teuchos::Array<typename MV::dot_type> dots (X.getNumVectors ());
+  // Y.dot (X, dots ());
+  // return dots[0];
+
+  return accurate_dot (X, Y);
 }
 
 template<class MV, class OP>
@@ -278,9 +558,9 @@ bicgstab_aztecoo (MV& x,
   p.putScalar (STS::zero ());
 
   // "set rtilda" [sic]
-  constexpr int AZ_aux_vec = 0; // AZ_resid = 0; AZ_rand (?) = 1
-  constexpr int AZ_resid = 0;
-  if (AZ_aux_vec == AZ_resid) {
+  constexpr int my_AZ_aux_vec = 0; // AZ_resid = 0; AZ_rand (?) = 1
+  constexpr int my_AZ_resid = 0;
+  if (my_AZ_aux_vec == my_AZ_resid) {
     Tpetra::deep_copy (r_tld, r);
   }
   else {
@@ -1254,6 +1534,8 @@ struct CmdLineArgs {
   bool useDiagonalToEquilibrate = false;
   bool useLapack = false;
   bool useCustomBicgstab = false;
+  bool useAztecOO = false;
+  bool printSolution = false;
 };
 
 // Read in values of command-line arguments.
@@ -1307,6 +1589,13 @@ getCmdLineArgs (CmdLineArgs& args, int argc, char* argv[])
                   &args.useCustomBicgstab,
                   "Whether to compare against a hand-rolled BiCGSTAB "
 		  "implementation.");
+  cmdp.setOption ("aztecoo", "no-aztecoo",
+                  &args.useAztecOO,
+                  "Whether to compare against AztecOO.");
+  cmdp.setOption ("printSolution", "dontPrintSolution",
+                  &args.printSolution,
+                  "Whether to print the solution vector(s), "
+		  "for each solution method.");
 
   auto result = cmdp.parse (argc, argv);
   return result == Teuchos::CommandLineProcessor::PARSE_SUCCESSFUL;
@@ -1657,7 +1946,7 @@ solveAndReport (BelosIfpack2Solver<CrsMatrixType>& solver,
                 MultiVectorType& X,
                 MultiVectorType& B,
                 const std::string& solverType,
-                const std::string& precType,
+                /*const std::string& */ std::string precType,
                 const typename MultiVectorType::mag_type convergenceTolerance,
                 const int maxIters,
                 const int restartLength,
@@ -1684,9 +1973,22 @@ solveAndReport (BelosIfpack2Solver<CrsMatrixType>& solver,
   }
 
   RCP<ParameterList> precParams (new ParameterList ("Ifpack2"));
+#if 1
   if (precType == "RELAXATION") {
     precParams->set ("relaxation: type", "Symmetric Gauss-Seidel");
   }
+#else
+  precType = "SCHWARZ";
+  precParams->set ("schwarz: subdomain solver name", "RELAXATION");
+  {
+    ParameterList& relaxParams =
+      precParams->sublist ("schwarz: subdomain solver parameters", false);
+    relaxParams.set ("relaxation: type", "Symmetric Gauss-Seidel");
+  }
+  precParams->set ("schwarz: overlap level", int (0));
+  precParams->set ("schwarz: use reordering", true);
+  //precParams->set ("schwarz: filter singletons", true);
+#endif // 0
 
   RCP<ParameterList> equibParams (new ParameterList ("Equilibration"));
   equibParams->set ("Equilibrate", args.equilibrate);
@@ -1769,6 +2071,11 @@ solveAndReport (BelosIfpack2Solver<CrsMatrixType>& solver,
     }
     cout << endl;
   }
+
+  if (args.printSolution) {
+    using writer_type = Tpetra::MatrixMarket::Writer<CrsMatrixType>;
+    writer_type::writeDense (std::cout, X, "X", "Belos solution");
+  }
 }
 
 } // namespace (anonymous)
@@ -1784,6 +2091,7 @@ main (int argc, char* argv[])
   using MV = Tpetra::MultiVector<>;
   // using mag_type = MV::mag_type;
   using reader_type = Tpetra::MatrixMarket::Reader<crs_matrix_type>;
+  using writer_type = Tpetra::MatrixMarket::Writer<crs_matrix_type>;
 
   TpetraInstance tpetraInstance (&argc, &argv);
   auto comm = Tpetra::getDefaultComm ();
@@ -2041,18 +2349,24 @@ main (int argc, char* argv[])
 	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
 	auto result = bicgstab (X_copy, A_ref, M, B_copy, maxIters, convTol);
 
-	using std::cout;
-	using std::endl;
-	cout << "Solver:" << endl
-	     << "  Solver type: Custom BiCGSTAB" << endl
-	     << "  Preconditioner type: NONE" << endl
-	     << "  Convergence tolerance: " << convTol << endl
-	     << "  Maximum number of iterations: " << maxIters << endl
-	     << "Results:" << endl
-	     << "  Converged: " << std::get<2> (result) << endl
-	     << "  Number of iterations: " << std::get<1> (result) << endl
-	     << "  Achieved tolerance: " << std::get<0> (result) << endl
-	     << endl;
+	if (comm->getRank () == 0) {
+	  using std::cout;
+	  using std::endl;
+	  cout << "Solver:" << endl
+	       << "  Solver type: Custom BiCGSTAB" << endl
+	       << "  Preconditioner type: NONE" << endl
+	       << "  Convergence tolerance: " << convTol << endl
+	       << "  Maximum number of iterations: " << maxIters << endl
+	       << "Results:" << endl
+	       << "  Converged: " << std::get<2> (result) << endl
+	       << "  Number of iterations: " << std::get<1> (result) << endl
+	       << "  Achieved tolerance: " << std::get<0> (result) << endl
+	       << endl;
+	}
+		
+	if (args.printSolution) {
+	  writer_type::writeDense (std::cout, X_copy, "X", "Custom BiCGSTAB solution");
+	}
       }
     }
   }
@@ -2066,18 +2380,23 @@ main (int argc, char* argv[])
 	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
 	auto result = bicgstab_aztecoo (X_copy, A_ref, M, B_copy, maxIters, convTol);
 
-	using std::cout;
-	using std::endl;
-	cout << "Solver:" << endl
-	     << "  Solver type: AztecOO-imitating custom BiCGSTAB" << endl
-	     << "  Preconditioner type: NONE" << endl
-	     << "  Convergence tolerance: " << convTol << endl
-	     << "  Maximum number of iterations: " << maxIters << endl
-	     << "Results:" << endl
-	     << "  Converged: " << std::get<2> (result) << endl
-	     << "  Number of iterations: " << std::get<1> (result) << endl
-	     << "  Achieved tolerance: " << std::get<0> (result) << endl
-	     << endl;
+	if (comm->getRank () == 0) {
+	  using std::cout;
+	  using std::endl;
+	  cout << "Solver:" << endl
+	       << "  Solver type: AztecOO-imitating custom BiCGSTAB" << endl
+	       << "  Preconditioner type: NONE" << endl
+	       << "  Convergence tolerance: " << convTol << endl
+	       << "  Maximum number of iterations: " << maxIters << endl
+	       << "Results:" << endl
+	       << "  Converged: " << std::get<2> (result) << endl
+	       << "  Number of iterations: " << std::get<1> (result) << endl
+	       << "  Achieved tolerance: " << std::get<0> (result) << endl
+	       << endl;
+	}
+	if (args.printSolution) {
+	  writer_type::writeDense (std::cout, X_copy, "X", "AztecOO-imitating custom BiCGSTAB solution");
+	}
       }
     }
   }
@@ -2091,22 +2410,57 @@ main (int argc, char* argv[])
 	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
 	auto result = bicgstab_paper (X_copy, A_ref, M, B_copy, maxIters, convTol);
 
-	using std::cout;
-	using std::endl;
-	cout << "Solver:" << endl
-	     << "  Solver type: Original paper BiCGSTAB" << endl
-	     << "  Preconditioner type: NONE" << endl
-	     << "  Convergence tolerance: " << convTol << endl
-	     << "  Maximum number of iterations: " << maxIters << endl
-	     << "Results:" << endl
-	     << "  Converged: " << std::get<2> (result) << endl
-	     << "  Number of iterations: " << std::get<1> (result) << endl
-	     << "  Achieved tolerance: " << std::get<0> (result) << endl
-	     << endl;
+	if (comm->getRank () == 0) {
+	  using std::cout;
+	  using std::endl;
+	  cout << "Solver:" << endl
+	       << "  Solver type: Original paper BiCGSTAB" << endl
+	       << "  Preconditioner type: NONE" << endl
+	       << "  Convergence tolerance: " << convTol << endl
+	       << "  Maximum number of iterations: " << maxIters << endl
+	       << "Results:" << endl
+	       << "  Converged: " << std::get<2> (result) << endl
+	       << "  Number of iterations: " << std::get<1> (result) << endl
+	       << "  Achieved tolerance: " << std::get<0> (result) << endl
+	       << endl;
+	}
+	if (args.printSolution) {
+	  writer_type::writeDense (std::cout, X_copy, "X", "Original paper BiCGSTAB solution");
+	}
       }
     }
   }
-  
+
+  if (args.useAztecOO) {
+    MV X_copy (*X, Teuchos::Copy);
+    MV B_copy (*B, Teuchos::Copy);
+    auto epetraLinSys = tpetraToEpetraLinearSystem (*A, X_copy, B_copy);
+
+    for (double convTol : convergenceToleranceValues) {
+      for (int maxIters : maxIterValues) {
+	auto result = solveEpetraLinearSystemWithAztecOO (epetraLinSys, convTol, maxIters);
+
+	if (comm->getRank () == 0) {
+	  using std::cout;
+	  using std::endl;
+	  cout << "Solver:" << endl
+	       << "  Solver type: AztecOO BiCGSTAB" << endl
+	       << "  Preconditioner type: DEFAULT" << endl
+	       << "  Convergence tolerance: " << convTol << endl
+	       << "  Maximum number of iterations: " << maxIters << endl
+	       << "Results:" << endl
+	       << "  Converged: " << std::get<2> (result) << endl
+	       << "  Number of iterations: " << std::get<1> (result) << endl
+	       << "  Achieved tolerance: " << std::get<0> (result) << endl
+	       << endl;
+	}
+	// if (args.printSolution) {
+	//   writer_type::writeDense (std::cout, X_copy, "X", "AztecOO solution");
+	// }
+      }
+    }
+  }
+
   // Create the solver.
   BelosIfpack2Solver<crs_matrix_type> solver (A);
 
