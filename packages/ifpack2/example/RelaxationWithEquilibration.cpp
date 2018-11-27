@@ -2349,6 +2349,12 @@ main (int argc, char* argv[])
 	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
 	auto result = bicgstab (X_copy, A_ref, M, B_copy, maxIters, convTol);
 
+	MV R (*B, Teuchos::Copy);
+	A->apply (X_copy, R, Teuchos::NO_TRANS, -1.0, 1.0);
+	const double B_norm = norm (B_copy);
+	const double R_norm = norm (R);
+	const double explicitRelResNorm = R_norm / B_norm;
+
 	if (comm->getRank () == 0) {
 	  using std::cout;
 	  using std::endl;
@@ -2361,6 +2367,7 @@ main (int argc, char* argv[])
 	       << "  Converged: " << std::get<2> (result) << endl
 	       << "  Number of iterations: " << std::get<1> (result) << endl
 	       << "  Achieved tolerance: " << std::get<0> (result) << endl
+	       << "  ||B-A*X||_2 / ||B||_2: " << explicitRelResNorm << endl
 	       << endl;
 	}
 		
@@ -2380,6 +2387,12 @@ main (int argc, char* argv[])
 	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
 	auto result = bicgstab_aztecoo (X_copy, A_ref, M, B_copy, maxIters, convTol);
 
+	MV R (*B, Teuchos::Copy);
+	A->apply (X_copy, R, Teuchos::NO_TRANS, -1.0, 1.0);
+	const double B_norm = norm (B_copy);
+	const double R_norm = norm (R);
+	const double explicitRelResNorm = R_norm / B_norm;
+	
 	if (comm->getRank () == 0) {
 	  using std::cout;
 	  using std::endl;
@@ -2392,6 +2405,7 @@ main (int argc, char* argv[])
 	       << "  Converged: " << std::get<2> (result) << endl
 	       << "  Number of iterations: " << std::get<1> (result) << endl
 	       << "  Achieved tolerance: " << std::get<0> (result) << endl
+	       << "  ||B-A*X||_2 / ||B||_2: " << explicitRelResNorm << endl
 	       << endl;
 	}
 	if (args.printSolution) {
@@ -2410,6 +2424,12 @@ main (int argc, char* argv[])
 	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
 	auto result = bicgstab_paper (X_copy, A_ref, M, B_copy, maxIters, convTol);
 
+	MV R (*B, Teuchos::Copy);
+	A->apply (X_copy, R, Teuchos::NO_TRANS, -1.0, 1.0);
+	const double B_norm = norm (B_copy);
+	const double R_norm = norm (R);
+	const double explicitRelResNorm = R_norm / B_norm;
+
 	if (comm->getRank () == 0) {
 	  using std::cout;
 	  using std::endl;
@@ -2422,6 +2442,7 @@ main (int argc, char* argv[])
 	       << "  Converged: " << std::get<2> (result) << endl
 	       << "  Number of iterations: " << std::get<1> (result) << endl
 	       << "  Achieved tolerance: " << std::get<0> (result) << endl
+	       << "  ||B-A*X||_2 / ||B||_2: " << explicitRelResNorm << endl
 	       << endl;
 	}
 	if (args.printSolution) {
