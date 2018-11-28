@@ -41,6 +41,16 @@
 
 namespace { // (anonymous)
 
+// See example here:
+//
+// http://en.cppreference.com/w/cpp/string/byte/toupper
+std::string stringToUpper (std::string s)
+{
+  std::transform (s.begin (), s.end (), s.begin (),
+                  [] (unsigned char c) { return std::toupper (c); });
+  return s;
+}
+
 // I know it looks weird to use a unique_ptr here, but Epetra_Comm
 // actually has its own shallow-copy semantics, so we don't need
 // shared_ptr here.
@@ -247,6 +257,7 @@ tpetraToEpetraLinearSystem (const Tpetra::CrsMatrix<double, LO, GO, NT>& A_t,
 
 std::tuple<double, int, bool>
 solveEpetraLinearSystemWithAztecOO (std::tuple<Epetra_CrsMatrix, Epetra_Vector, Epetra_Vector>& sys,
+				    const std::string& solverType,
 				    const double convTol,
 				    const int maxNumIters)
 {
@@ -258,9 +269,36 @@ solveEpetraLinearSystemWithAztecOO (std::tuple<Epetra_CrsMatrix, Epetra_Vector, 
   AztecOO solver (problem);
   //(void) solver.SetAztecOption (AZ_precond, AZ_sym_GS);
   (void) solver.SetAztecOption (AZ_precond, AZ_none);
-  (void) solver.SetAztecOption (AZ_solver, AZ_bicgstab);
-  const int errCode = solver.Iterate (maxNumIters, convTol);
 
+  const std::string upperSolverType = stringToUpper (solverType);
+  int errCode = 0;
+  int aztecOO_solverType = AZ_gmres;
+  if (upperSolverType == "BICGSTAB") {
+    aztecOO_solverType = AZ_bicgstab;
+  }
+  else if (upperSolverType == "CG") {
+    aztecOO_solverType = AZ_cg;
+  }
+  else if (upperSolverType == "CGS") {
+    aztecOO_solverType = AZ_cgs;
+  }
+  else if (upperSolverType == "GMRES") {
+    aztecOO_solverType = AZ_gmres;
+  }
+  else if (upperSolverType == "TFQMR") {
+    aztecOO_solverType = AZ_tfqmr;
+  }
+  else {
+    TEUCHOS_TEST_FOR_EXCEPTION
+      (true, std::invalid_argument, "Linear solver type \"" << solverType
+       << "\" not currently supported for AztecOO.");
+  }
+  errCode = solver.SetAztecOption (AZ_solver, aztecOO_solverType);
+  if (errCode != 0) {
+    return {-1.0, 0, false};
+  }
+
+  errCode = solver.Iterate (maxNumIters, convTol);
   bool success = true;
   if (errCode == 0) {
     success = true;
@@ -271,7 +309,6 @@ solveEpetraLinearSystemWithAztecOO (std::tuple<Epetra_CrsMatrix, Epetra_Vector, 
   else { // negative means error code
     success = false;
   }
-  
   return {solver.ScaledResidual (), solver.NumIters (), success};
 }
 
@@ -326,180 +363,6 @@ typename MV::dot_type dot (const MV& X, const MV& Y)
   // return dots[0];
 
   return accurate_dot (X, Y);
-}
-
-template<class MV, class OP>
-std::tuple<typename MV::mag_type, int, bool>
-bicgstab (MV& x,
-	  const OP& A,
-	  const OP* const M,
-	  const MV& b,
-	  const int max_it,
-	  const typename MV::mag_type tol)
-{
-  using STS = Teuchos::ScalarTraits<typename MV::scalar_type>;
-  using STM = Teuchos::ScalarTraits<typename MV::mag_type>;
-  using dot_type = typename MV::dot_type;
-  using mag_type = typename MV::mag_type;  
-  
-  int iter = 0;
-
-  mag_type bnrm2 = norm (b);
-  if (bnrm2 == STM::zero ()) {
-    x.putScalar (STS::zero ());
-    bnrm2 = STM::one ();
-    return {bnrm2, 0, true};
-  }
-
-  MV r (b.getMap (), b.getNumVectors ());
-
-  residual (r, b, A, x); // r = b - A*x;
-  mag_type error = norm (r) / bnrm2;
-  if (error < tol) {
-    return {error, 0, true};
-  }
-  dot_type omega = STS::one ();
-  dot_type alpha;
-  dot_type rho;
-  dot_type rho_1;  
-  dot_type beta;
-  mag_type resid;
-
-  MV r_tld (r.getMap (), r.getNumVectors ());
-  Tpetra::deep_copy (r_tld, r);
-
-  MV p (r.getMap (), r.getNumVectors ());
-  MV p_hat (x.getMap (), r.getNumVectors ());
-  MV v (r.getMap (), r.getNumVectors ());
-  MV s (r.getMap (), r.getNumVectors ());
-  MV s_hat (r.getMap (), r.getNumVectors ());
-  MV t (r.getMap (), r.getNumVectors ());    
-
-  for (iter = 1; iter <= max_it; ++iter) {
-    std::cerr << ">>> Hand-rolled BiCGSTAB: iter = " << (iter - 1) << std::endl;
-    
-    rho = dot (r_tld, r); // ( r_tld'*r );
-    std::cerr << "  rho = " << rho << std::endl;
-
-    if (rho == 0.0) {
-      return {error, iter, false};
-    }
-
-    if (iter > 1) {
-      beta = (rho / rho_1) * (alpha / omega);
-      std::cerr << "  beta = " << beta << std::endl;
-
-      p.update (-omega, v, 0.0); // p = p - omega*v
-      p.update (1.0, r, beta, p, 0.0); // p = r + beta*( p - omega*v );
-    }
-    else {
-      p = r;
-    }
-    
-#if 0
-    if (iter > 1) {
-      beta = (rho / rho_1) * (alpha / omega);
-      std::cerr << "  beta = " << beta << std::endl;
-
-      p.update (-omega, v, 1.0); // p = p - omega*v
-      p.update (1.0, r, beta, p, 0.0); // p = r + beta*( p - omega*v );
-    }
-    else {
-      Tpetra::deep_copy (p, r);
-    }
-#endif // 0
-
-#if 0
-    if (iter > 1) {
-      beta = (rho / rho_1) * (alpha / omega);
-      std::cerr << "  beta = " << beta << std::endl;
-      if (false) { // NOTE (mfh 13 Nov 2018) weirdly, this branch works
-	//p.update (-omega, v, 0.0); // p = p - omega*v
-	p.update (-omega, v, 0.0); // p = p - omega*v
-	p.update (1.0, r, beta, p, 0.0); // p = r + beta*( p - omega*v );
-      }
-      else if (false) { // NOTE (mfh 13 Nov 2018) does NOT work
-	MV p_tmp (p, Teuchos::Copy);
-	p_tmp.update (-omega, v, 0.0);
-	p.update (1.0, r, beta, p_tmp, 0.0);
-      }
-      else if (false) { // NOTE (mfh 13 Nov 2018) does NOT work
-	MV p_tmp (p, Teuchos::Copy);
-	p_tmp.update (-omega, v, 1.0);
-	p.update (1.0, r, beta, p_tmp, 0.0);
-      }
-      else { // NOTE (mfh 13 Nov 2018) does NOT work
-	MV p_tmp (p, Teuchos::Copy);
-	p_tmp.update (-omega, v, 0.0);
-	p.putScalar (0.0);
-	p.update (1.0, r, beta, p_tmp, 0.0);
-      }
-    }
-    else {
-      p = r; // oddly enough, this is actually what we want when there
-	     // is no preconditioner.  If we do deep_copy instead,
-	     // then the solver fails to converge.  I'm not sure how
-	     // this works, given the formulae above.
-      //Tpetra::deep_copy (p, r);
-    }
-#endif // 0
-
-    std::cerr << "  ||P_0||_2 = " << norm (p) << std::endl;
-
-    if (M != nullptr) {
-      M->apply (p, p_hat);
-    }
-    else {
-      Tpetra::deep_copy (p_hat, p);
-    }
-
-    A.apply (p_hat, v);
-
-    std::cerr << "  ||Y_0||_2 = " << norm (p_hat) << std::endl;
-    std::cerr << "  ||V_0||_2 = " << norm (v) << std::endl;
-    std::cerr << "  ||Rhat_0||_2 = " << norm (r_tld) << std::endl;        
-    std::cerr << "  rhatV = " << dot (r_tld, v) << std::endl;        
-
-    alpha = rho / dot (r_tld, v);
-    std::cerr << "  alpha = " << alpha << std::endl;    
-    s.update (1.0, r, -alpha, v, 0.0); // s = r - alpha*v;
-    if (norm(s) < tol) {
-      // x = x + alpha*p_hat;
-      resid = norm (s) / bnrm2;
-      break;
-    }
-
-    if (M != nullptr) {
-      M->apply (s, s_hat);
-    }
-    else {
-      Tpetra::deep_copy (s_hat, s);
-    }
-
-    A.apply (s_hat, t);
-    omega = dot (t, s) / dot (t, t);
-    std::cerr << "  omega = " << omega << std::endl;
-
-    // x = x + alpha*p_hat + omega*s_hat;
-    x.update (alpha, p_hat, omega, s_hat, 1.0); 
-    r.update (1.0, s, -omega, t, 0.0); // r = s - omega*t
-
-    error = norm (r) / bnrm2;
-    if (error <= tol) {
-      break;
-    }
-    if (omega == 0.0) {
-      break;
-    }
-    rho_1 = rho;
-  }
-
-  if (error <= tol) {
-    return {error, iter, true};
-  }
-  else {
-    return {error, iter, false};
-  }
 }
 
 template<class MV>
@@ -672,12 +535,11 @@ bicgstab_aztecoo (MV& x,
 
 template<class MV, class OP>
 std::tuple<typename MV::mag_type, int, bool>
-bicgstab_paper (MV& x,
-		const OP& A,
-		const OP* const /* M */,
-		const MV& b,
-		const int max_it,
-		const typename MV::mag_type tol)
+bicgstab_no_prec_paper (MV& x,
+			const OP& A,
+			const MV& b,
+			const int max_it,
+			const typename MV::mag_type tol)
 {
   using dot_type = typename MV::dot_type;
   using mag_type = typename MV::mag_type;
@@ -1449,16 +1311,6 @@ elementWiseDivideMultiVector (MultiVectorType& X,
   }
 }
 
-// See example here:
-//
-// http://en.cppreference.com/w/cpp/string/byte/toupper
-std::string stringToUpper (std::string s)
-{
-  std::transform (s.begin (), s.end (), s.begin (),
-                  [] (unsigned char c) { return std::toupper (c); });
-  return s;
-}
-
 std::vector<std::string>
 splitIntoStrings (const std::string& s,
                   const char sep = ',')
@@ -1536,6 +1388,7 @@ struct CmdLineArgs {
   bool useCustomBicgstab = false;
   bool useAztecOO = false;
   bool printSolution = false;
+  bool useReorderingInIfpack2 = false;
 };
 
 // Read in values of command-line arguments.
@@ -1596,6 +1449,9 @@ getCmdLineArgs (CmdLineArgs& args, int argc, char* argv[])
                   &args.printSolution,
                   "Whether to print the solution vector(s), "
 		  "for each solution method.");
+  cmdp.setOption ("useReorderingInIfpack2", "dontUseReorderingInIfpack2",
+                  &args.useReorderingInIfpack2,
+                  "Whether to use reordering in Ifpack2.");
 
   auto result = cmdp.parse (argc, argv);
   return result == Teuchos::CommandLineProcessor::PARSE_SUCCESSFUL;
@@ -1973,22 +1829,24 @@ solveAndReport (BelosIfpack2Solver<CrsMatrixType>& solver,
   }
 
   RCP<ParameterList> precParams (new ParameterList ("Ifpack2"));
-#if 1
-  if (precType == "RELAXATION") {
-    precParams->set ("relaxation: type", "Symmetric Gauss-Seidel");
+
+  if (args.useReorderingInIfpack2) {
+    precType = "SCHWARZ";
+    precParams->set ("schwarz: subdomain solver name", "RELAXATION");
+    {
+      ParameterList& relaxParams =
+	precParams->sublist ("schwarz: subdomain solver parameters", false);
+      relaxParams.set ("relaxation: type", "Symmetric Gauss-Seidel");
+    }
+    precParams->set ("schwarz: overlap level", int (0));
+    precParams->set ("schwarz: use reordering", true);
+    //precParams->set ("schwarz: filter singletons", true);
   }
-#else
-  precType = "SCHWARZ";
-  precParams->set ("schwarz: subdomain solver name", "RELAXATION");
-  {
-    ParameterList& relaxParams =
-      precParams->sublist ("schwarz: subdomain solver parameters", false);
-    relaxParams.set ("relaxation: type", "Symmetric Gauss-Seidel");
+  else {
+    if (precType == "RELAXATION") {
+      precParams->set ("relaxation: type", "Symmetric Gauss-Seidel");
+    }
   }
-  precParams->set ("schwarz: overlap level", int (0));
-  precParams->set ("schwarz: use reordering", true);
-  //precParams->set ("schwarz: filter singletons", true);
-#endif // 0
 
   RCP<ParameterList> equibParams (new ParameterList ("Equilibration"));
   equibParams->set ("Equilibrate", args.equilibrate);
@@ -2347,44 +2205,6 @@ main (int argc, char* argv[])
 	MV B_copy (*B, Teuchos::Copy);
 	const Tpetra::Operator<>* M = nullptr;
 	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
-	auto result = bicgstab (X_copy, A_ref, M, B_copy, maxIters, convTol);
-
-	MV R (*B, Teuchos::Copy);
-	A->apply (X_copy, R, Teuchos::NO_TRANS, -1.0, 1.0);
-	const double B_norm = norm (B_copy);
-	const double R_norm = norm (R);
-	const double explicitRelResNorm = R_norm / B_norm;
-
-	if (comm->getRank () == 0) {
-	  using std::cout;
-	  using std::endl;
-	  cout << "Solver:" << endl
-	       << "  Solver type: Custom BiCGSTAB" << endl
-	       << "  Preconditioner type: NONE" << endl
-	       << "  Convergence tolerance: " << convTol << endl
-	       << "  Maximum number of iterations: " << maxIters << endl
-	       << "Results:" << endl
-	       << "  Converged: " << std::get<2> (result) << endl
-	       << "  Number of iterations: " << std::get<1> (result) << endl
-	       << "  Achieved tolerance: " << std::get<0> (result) << endl
-	       << "  ||B-A*X||_2 / ||B||_2: " << explicitRelResNorm << endl
-	       << endl;
-	}
-		
-	if (args.printSolution) {
-	  writer_type::writeDense (std::cout, X_copy, "X", "Custom BiCGSTAB solution");
-	}
-      }
-    }
-  }
-
-  if (args.useCustomBicgstab) {
-    for (double convTol : convergenceToleranceValues) {
-      for (int maxIters : maxIterValues) {
-	MV X_copy (*X, Teuchos::Copy);
-	MV B_copy (*B, Teuchos::Copy);
-	const Tpetra::Operator<>* M = nullptr;
-	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
 	auto result = bicgstab_aztecoo (X_copy, A_ref, M, B_copy, maxIters, convTol);
 
 	MV R (*B, Teuchos::Copy);
@@ -2413,16 +2233,13 @@ main (int argc, char* argv[])
 	}
       }
     }
-  }
 
-  if (args.useCustomBicgstab) {
     for (double convTol : convergenceToleranceValues) {
       for (int maxIters : maxIterValues) {
 	MV X_copy (*X, Teuchos::Copy);
 	MV B_copy (*B, Teuchos::Copy);	
-	const Tpetra::Operator<>* M = nullptr;
 	const Tpetra::Operator<>& A_ref = static_cast<const Tpetra::Operator<>& > (*A);
-	auto result = bicgstab_paper (X_copy, A_ref, M, B_copy, maxIters, convTol);
+	auto result = bicgstab_no_prec_paper (X_copy, A_ref, B_copy, maxIters, convTol);
 
 	MV R (*B, Teuchos::Copy);
 	A->apply (X_copy, R, Teuchos::NO_TRANS, -1.0, 1.0);
@@ -2457,27 +2274,29 @@ main (int argc, char* argv[])
     MV B_copy (*B, Teuchos::Copy);
     auto epetraLinSys = tpetraToEpetraLinearSystem (*A, X_copy, B_copy);
 
-    for (double convTol : convergenceToleranceValues) {
-      for (int maxIters : maxIterValues) {
-	auto result = solveEpetraLinearSystemWithAztecOO (epetraLinSys, convTol, maxIters);
+    for (std::string solverType : solverTypes) {
+      for (double convTol : convergenceToleranceValues) {
+	for (int maxIters : maxIterValues) {
+	  auto result = solveEpetraLinearSystemWithAztecOO (epetraLinSys, solverType, convTol, maxIters);
 
-	if (comm->getRank () == 0) {
-	  using std::cout;
-	  using std::endl;
-	  cout << "Solver:" << endl
-	       << "  Solver type: AztecOO BiCGSTAB" << endl
-	       << "  Preconditioner type: DEFAULT" << endl
-	       << "  Convergence tolerance: " << convTol << endl
-	       << "  Maximum number of iterations: " << maxIters << endl
-	       << "Results:" << endl
-	       << "  Converged: " << std::get<2> (result) << endl
-	       << "  Number of iterations: " << std::get<1> (result) << endl
-	       << "  Achieved tolerance: " << std::get<0> (result) << endl
-	       << endl;
+	  if (comm->getRank () == 0) {
+	    using std::cout;
+	    using std::endl;
+	    cout << "Solver:" << endl
+		 << "  Solver type: AztecOO " << solverType << endl
+		 << "  Preconditioner type: NONE" << endl
+		 << "  Convergence tolerance: " << convTol << endl
+		 << "  Maximum number of iterations: " << maxIters << endl
+		 << "Results:" << endl
+		 << "  Converged: " << std::get<2> (result) << endl
+		 << "  Number of iterations: " << std::get<1> (result) << endl
+		 << "  Achieved tolerance: " << std::get<0> (result) << endl
+		 << endl;
+	  }
+	  // if (args.printSolution) {
+	  //   writer_type::writeDense (std::cout, X_copy, "X", "AztecOO solution");
+	  // }
 	}
-	// if (args.printSolution) {
-	//   writer_type::writeDense (std::cout, X_copy, "X", "AztecOO solution");
-	// }
       }
     }
   }
