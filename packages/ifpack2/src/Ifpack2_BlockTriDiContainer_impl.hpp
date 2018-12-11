@@ -72,6 +72,8 @@
 #include <KokkosBatched_LU_Serial_Impl.hpp>
 #include <KokkosBatched_LU_Team_Impl.hpp>
 
+#include <cctype>
+#include <cstdlib>
 #include <memory>
 
 // need to interface this into cmake variable (or only use this flag when it is necessary)
@@ -81,9 +83,55 @@
 #include "cuda_profiler_api.h"
 #endif
 
+namespace { // (anonymous)
+
+std::string uppercase (const char raw[])
+{
+  std::string s (raw);
+  const std::size_t len = s.size ();
+  for (std::size_t k = 0; k < len; ++k) {
+    s[k] = std::toupper (s[k]);
+  }
+  return s;
+}
+
+} // namespace (anonymous)
+
 namespace Ifpack2 {
 
   namespace BlockTriDiContainerDetails {
+
+    enum ECommMemorySpace {
+      HOST,
+      DEVICE,
+      PINNED
+    };
+
+    ECommMemorySpace
+    get_comm_memory_space ()
+    {
+      static bool first_call = true;
+      static ECommMemorySpace mem_space = HOST; // reasonable default
+
+      if (first_call) {
+        const char env_var_name[] = "IFPACK2_COMM_MEMORY_SPACE";
+        const char* env_p = std::getenv (env_var_name);
+        if (env_p != nullptr) {
+          const std::string mem_space_str (uppercase (env_p));
+          if (mem_space_str == "PINNED" || "HOSTPINNED" || "CUDAHOSTPINNEDSPACE") {
+            mem_space = PINNED;
+          }
+          else if (mem_space_str == "DEVICE" || "CUDA" || "CUDASPACE") {
+            mem_space = DEVICE;
+          }
+          else if (mem_space_str == "HOST" || "HOSTSPACE") {
+            mem_space = HOST;
+          }
+        }
+        first_call = false;
+      }
+      return mem_space;
+    }
 
     // Per-process communication buffer for AsyncableImport.
     //
@@ -95,6 +143,9 @@ namespace Ifpack2 {
       using layout_type = Kokkos::LayoutLeft;
 #ifdef KOKKOS_ENABLE_CUDA
       using pinned_memory_space = Kokkos::CudaHostPinnedSpace;
+      // We've seen MPI implementations have trouble detecting that
+      // UVM buffers were actually device memory.  This slowed things
+      // down a lot.  Thus, we don't use UVM with MPI.
       using memory_space = Kokkos::CudaSpace;
 #else
       using pinned_memory_space = Kokkos::HostSpace;
@@ -117,26 +168,24 @@ namespace Ifpack2 {
       // "Total receive size" means "over all receives that this process issues."
       SendRecvBuffer (const std::string& label,
                       const size_t total_recv_size,
-                      const size_t total_send_size,
-                      const bool use_device,
-                      const bool use_pinned)
+                      const size_t total_send_size)
       {
         using do_not_init = Kokkos::ViewAllocateWithoutInitializing;
         const size_t alloc_size = total_recv_size + total_send_size;
 
         const std::pair<size_t, size_t> recv_range (0, total_recv_size);
         const std::pair<size_t, size_t> send_range (total_recv_size, alloc_size);
-        if (use_device) {
-          if (use_pinned) {
-            pin_view_ = pinned_view_type (do_not_init (label), alloc_size);
-            recv_view_ = view_type (Kokkos::subview (pin_view_, recv_range));
-            send_view_ = view_type (Kokkos::subview (pin_view_, send_range));
-          }
-          else {
-            dev_view_ = device_view_type (do_not_init (label), alloc_size);
-            recv_view_ = view_type (Kokkos::subview (dev_view_, recv_range));
-            send_view_ = view_type (Kokkos::subview (dev_view_, send_range));
-          }
+
+        const ECommMemorySpace comm_mem_space = get_comm_memory_space ();
+        if (comm_mem_space == PINNED) {
+          pin_view_ = pinned_view_type (do_not_init (label), alloc_size);
+          recv_view_ = view_type (Kokkos::subview (pin_view_, recv_range));
+          send_view_ = view_type (Kokkos::subview (pin_view_, send_range));
+        }
+        else if (comm_mem_space == DEVICE) {
+          dev_view_ = device_view_type (do_not_init (label), alloc_size);
+          recv_view_ = view_type (Kokkos::subview (dev_view_, recv_range));
+          send_view_ = view_type (Kokkos::subview (dev_view_, send_range));
         }
         else {
           host_view_ = host_view_type (do_not_init (label), alloc_size);
@@ -174,16 +223,12 @@ namespace Ifpack2 {
     std::unique_ptr<SendRecvBuffer<PacketType, Ifpack2DeviceType>>
     make_send_recv_buffer (const std::string& label,
                            const size_t total_recv_size,
-                           const size_t total_send_size,
-                           const bool use_device,
-                           const bool use_pinned)
+                           const size_t total_send_size)
     {
       using buf_type = SendRecvBuffer<PacketType, Ifpack2DeviceType>;
       // std::make_unique requires C++14.
       return std::unique_ptr<buf_type> (new buf_type (label, total_recv_size,
-                                                      total_send_size,
-                                                      use_device,
-                                                      use_pinned));
+                                                      total_send_size));
     }
 
 
@@ -668,9 +713,6 @@ namespace Ifpack2 {
             offset.recv[offset.recv.extent(0)-1]*blocksize*num_vectors;
           const size_t send_buf_size =
             offset.send[offset.send.extent(0)-1]*blocksize*num_vectors;
-          // FIXME (mfh 06 Dec 2018) make these run-time parameters.
-          constexpr bool use_device = true;
-          constexpr bool use_pinned = false;
 
           // Keep memory high-water mark low by freeing before
           // allocating.  This is especially important if we use
@@ -680,7 +722,7 @@ namespace Ifpack2 {
           using IST = impl_scalar_type;
           using DT = device_type;
           buffer = make_send_recv_buffer<IST, DT> ("Ifpack2 comm buffer",
-            recv_buf_size, send_buf_size, use_device, use_pinned);
+                                                   recv_buf_size, send_buf_size);
         }
       }
 
