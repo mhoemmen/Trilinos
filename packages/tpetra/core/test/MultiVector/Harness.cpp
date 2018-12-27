@@ -412,6 +412,12 @@ namespace Harness {
     using memory_space = typename ExecutionSpace::memory_space;
     using range_type = Kokkos::RangePolicy<execution_space, LO>;
 
+    // Use the execution space, not the memory space, so that the sync
+    // happens to the right place, even despite CudaUVMSpace.
+    if (X.template need_sync<execution_space> ()) {
+      X.template sync<execution_space> ();
+    }
+
     memory_space memSpace;
     if (X.getNumVectors () == size_t (1)) {
       auto X_lcl = getVector (readWrite (X).on (memSpace));
@@ -452,6 +458,12 @@ namespace Harness {
     using execution_space = typename ExecutionSpace::execution_space;
     using memory_space = typename ExecutionSpace::memory_space;
     using range_type = Kokkos::RangePolicy<execution_space, LO>;
+
+    // Use the execution space, not the memory space, so that the sync
+    // happens to the right place, even despite CudaUVMSpace.
+    if (X.template need_sync<execution_space> ()) {
+      X.template sync<execution_space> ();
+    }
 
     memory_space memSpace;
     if (X.getNumVectors () == size_t (1)) {
@@ -494,6 +506,12 @@ namespace Harness {
     using memory_space = typename ExecutionSpace::memory_space;
     using range_type = Kokkos::RangePolicy<execution_space, LO>;
 
+    // Use the execution space, not the memory space, so that the sync
+    // happens to the right place, even despite CudaUVMSpace.
+    if (X.template need_sync<execution_space> ()) {
+      X.template sync<execution_space> ();
+    }
+
     memory_space memSpace;
     if (X.getNumVectors () == size_t (1)) {
       auto X_lcl = getVector (readWrite (X).on (memSpace));
@@ -533,6 +551,116 @@ namespace Harness {
     using memory_space = typename MV::device_type::memory_space;
 
     transform (execution_space (), X, f);
+  }
+
+  namespace Impl {
+    template<class IndexType, class ReductionResultType, class TransformerType,
+	     const ::Teuchos::EReductionType reductionType>
+    class Reducer {};
+
+    template<class IndexType, class ReductionResultType, class TransformerType>
+    class Reducer<IndexType, ReductionResultType, TransformerType,
+		  Teuchos::REDUCE_SUM> {
+    public:
+      Reducer (const TransformerType& transformer) :
+	transformer_ (transformer) {}
+      
+      KOKKOS_INLINE_FUNCTION void
+      operator () (const IndexType i, ReductionResultType& dst) const
+      {
+	dst = reducer (dst, transformer (i));
+      }
+
+    private:
+      TransformerType transformer_;
+    };
+
+  } // namespace Impl
+  
+  template<class SC, class LO, class GO, class NT,
+	   class ReductionResultType,
+           class BinaryOp,
+	   class UnaryOp,
+           class ExecutionSpace>
+  void
+  transform_iallreduce (const OutputViewType& recvbuf,
+			const InputViewType& sendBuf,
+			ExecutionSpace execSpace,
+			Tpetra::MultiVector<SC, LO, GO, NT>& X,
+			ReductionResultType init,
+			const ::Teuchos::EReductionType reducer,
+			UnaryOp transformer)
+  {
+    using execution_space = typename ExecutionSpace::execution_space;
+    using memory_space = typename ExecutionSpace::memory_space;
+    using range_type = Kokkos::RangePolicy<execution_space, LO>;
+
+    // Use the execution space, not the memory space, so that the sync
+    // happens to the right place, even despite CudaUVMSpace.
+    if (X.template need_sync<execution_space> ()) {
+      X.template sync<execution_space> ();
+    }
+
+    const auto& comm = * (X.getMap ()->getComm ());
+    const bool is_mpi_parallel = comm.getSize () == 1;
+
+    memory_space memSpace;
+    if (X.getNumVectors () == size_t (1)) {
+      auto X_lcl = getVector (readWrite (X).on (memSpace));
+      ReductionResultType lclResult;
+
+      if (reducer == Teuchos::REDUCE_SUM) {
+	Kokkos::parallel_reduce
+	  ("transform_reduce",
+	   range_type (execSpace, 0, X_lcl.extent (0)),
+	   KOKKOS_LAMBDA (const LO i, ReductionResultType& dst) {
+	    dst += transformer (X_lcl(i));
+	  }, lclResult);
+      }
+      else if (reducer == Teuchos::REDUCE_MIN) {
+	Kokkos::parallel_reduce
+	  ("transform_reduce",
+	   range_type (execSpace, 0, X_lcl.extent (0)),
+	   KOKKOS_LAMBDA (const LO i, ReductionResultType& dst) {
+	    dst = sensible_min (dst, transformer (X_lcl(i)));
+	  }, lclResult);
+      }
+      else if (reducer == Teuchos::REDUCE_MAX) {
+	Kokkos::parallel_reduce
+	  ("transform_reduce",
+	   range_type (execSpace, 0, X_lcl.extent (0)),
+	   KOKKOS_LAMBDA (const LO i, ReductionResultType& dst) {
+	    dst = sensible_max (dst, transformer (X_lcl(i)));
+	  }, lclResult);
+      }
+      else if (reducer == Teuchos::REDUCE_AND) {
+	Kokkos::parallel_reduce
+	  ("transform_reduce",
+	   range_type (execSpace, 0, X_lcl.extent (0)),
+	   KOKKOS_LAMBDA (const LO i, ReductionResultType& dst) {
+	    dst = sensible_logical_and (dst, transformer (X_lcl(i)));
+	  }, lclResult);
+      }
+
+      if (comm.getSize () == 1) {
+	return lclResult;
+      }
+      else {
+	Teuchos::reduceAll (comm, ...);
+      }
+    }
+    else {
+      auto X_lcl = getMultiVector (readWrite (X).on (memSpace));
+      Kokkos::parallel_for
+	("transform_reduce",
+	 range_type (execSpace, 0, X_lcl.extent (0)),
+	 KOKKOS_LAMBDA (const LO i, ReductionResultType& dst) {
+	  const LO numVecs = X_lcl.extent (1);
+	  for (LO j = 0; j < numVecs; ++j) {
+	    dst = reducer (dst, transformer (X_lcl(i,j)));
+	  }
+	});
+    }
   }
 
   namespace Impl {
@@ -991,9 +1119,6 @@ namespace { // (anonymous)
       }
       TEST_ASSERT( ok );
     }
-
-
-
   }
 } // namespace (anonymous)
 
