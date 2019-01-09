@@ -89,11 +89,11 @@ testCooMatrix (bool& success,
   out << "Add entries locally to CooMatrix" << endl;
   const int myRank = comm->getRank ();
   if (myRank == 0) {
-    A_in.sumIntoGlobalValues ({666, 31, 31, 31}, {11, 6, 5, 6}, {-1.0, 1.0, 2.0, 111.0}, 4);
+    A_in.sumIntoGlobalValues ({666, 31, 31, 31}, {11, 6, 5, 6}, {-1.0, 1.0, 2.0, 111.0});
     TEST_EQUALITY( A_in.getLclNumEntries (), static_cast<std::size_t> (3) );
   }
   else if (myRank == 1) {
-    A_in.sumIntoGlobalValues ({418, 31}, {11, 5}, {11.0, 5.0}, 2);
+    A_in.sumIntoGlobalValues ({418, 31}, {11, 5}, {11.0, 5.0});
     TEST_EQUALITY( A_in.getLclNumEntries (), static_cast<std::size_t> (2) );
   }
 

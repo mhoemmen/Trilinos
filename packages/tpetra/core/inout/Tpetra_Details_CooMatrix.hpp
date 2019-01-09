@@ -652,12 +652,27 @@ public:
   }
 
   /// \brief Initializer-list overload of the above method (which see).
+  ///
+  /// \param gblRowInd [in] Global row indices of the entries to insert.
+  /// \param gblColInd [in] Global column indices of the entries to insert.
+  /// \param val [in] Values of the matrix entries to insert / sum.
+  ///
+  /// \pre <tt>gblRowInd.size() == gblColInd.size() &&
+  ///   gblRowInd.size() == val.size()</tt>
   void
   sumIntoGlobalValues (std::initializer_list<GO> gblRowInds,
                        std::initializer_list<GO> gblColInds,
-                       std::initializer_list<SC> vals,
-                       const std::size_t numEnt)
+                       std::initializer_list<SC> vals)
   {
+    const std::size_t numEnt = gblRowInds.size ();
+    if (gblColInds.size () != numEnt || vals.size () != numEnt) {
+      const char prefix[] = "Tpetra::Details::CooMatrix::sumIntoGlobalValues: ";
+      std::ostream& err = this->markLocalErrorAndGetStream ();
+      err << prefix << "Input initializer_list have different lengths. "
+        "gblRowInds.size()=" << gblRowInds.size ()
+        << ", gblColInds.size()=" << gblColInds.size ()
+        << ", vals.size()=" << vals.size () << std::endl;
+    }
     this->impl_.sumIntoGlobalValues (gblRowInds.begin (), gblColInds.begin (),
                                      vals.begin (), numEnt);
   }
