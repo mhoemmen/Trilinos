@@ -48,6 +48,7 @@
 ///   file input and output.
 
 #include "TpetraCore_config.h"
+#include "Tpetra_Details_readCooMatrixEntry.hpp"
 #include "Tpetra_Details_PackTriples.hpp"
 #include "Tpetra_DistObject.hpp"
 #include "Tpetra_Details_gathervPrint.hpp"
@@ -57,10 +58,7 @@
 #include <initializer_list>
 #include <map>
 #include <memory>
-#include <string>
-#include <type_traits>
 #include <vector>
-
 
 namespace Tpetra {
 namespace Details {
@@ -618,7 +616,7 @@ public:
   {}
 
   //! Destructor (virtual for memory safety of derived classes).
-  virtual ~CooMatrix () {}
+  virtual ~CooMatrix () = default;
 
   /// \brief Insert one entry locally into the sparse matrix, if it
   ///   does not exist there yet.  If it does exist, sum the values.
@@ -632,6 +630,19 @@ public:
                       const SC& val)
   {
     this->impl_.sumIntoGlobalValue (gblRowInd, gblColInd, val);
+  }
+
+  EReadEntryResult
+  sumIntoGlobalValue (const std::string& line)
+  {
+    GO row;
+    GO col;
+    SC val;
+    const EReadEntryResult result = readCooMatrixEntry (row, col, val, line);
+    if (result == READ_ENTRY_VALID) {
+      this->impl_.sumIntoGlobalValue (row, col, val);
+    }
+    return result;
   }
 
   /// \brief Insert multiple entries locally into the sparse matrix.
