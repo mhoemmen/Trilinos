@@ -53,11 +53,13 @@
 
 #include "TpetraCore_config.h"
 #include "Tpetra_Details_PackTriples.hpp"
+#include "Tpetra_Details_readCooMatrixEntry.hpp"
 #include "Kokkos_ArithTraits.hpp"
 #include "Teuchos_MatrixMarket_generic.hpp"
 #include "Teuchos_CommHelpers.hpp"
 #include <iostream>
-#include <typeinfo> // for debugging
+#include <memory>
+#include <typeinfo>
 
 namespace Tpetra {
 namespace Details {
@@ -98,15 +100,9 @@ namespace Impl {
 ///   of the matrix entry's value read from the line.
 /// \param lineNumber [in] The current line number.  Used only for
 ///   diagnostic error messages.
-/// \param tolerant [in] Whether to parse tolerantly.  In tolerant
-///   mode, if this function fails in any way to read any of the data,
-///   it will return false without throwing an exception.  Otherwise,
-///   this function will either throw an exception or return true.
 ///
 /// \return True if this function successfully read the line from istr
-///   and extracted all the output data, false otherwise.  If
-///   tolerant==false, this function never returns false; it either
-///   returns true or throws an exception.
+///   and extracted all the output data, false otherwise.
 template<class OrdinalType, class RealType>
 bool
 readComplexData (std::istream& istr,
@@ -114,45 +110,20 @@ readComplexData (std::istream& istr,
                  OrdinalType& colIndex,
                  RealType& realPart,
                  RealType& imagPart,
-                 const std::size_t lineNumber,
-                 const bool tolerant)
+                 const std::size_t lineNumber)
 {
   using ::Teuchos::MatrixMarket::readRealData;
 
   RealType the_realPart, the_imagPart;
-  if (! readRealData (istr, rowIndex, colIndex, the_realPart, lineNumber, tolerant)) {
-    if (tolerant) {
-      return false;
-    }
-    else {
-      std::ostringstream os;
-      os << "Failed to read pattern data and/or real value from line "
-         << lineNumber << " of input";
-      throw std::invalid_argument(os.str());
-    }
+  if (! readRealData (istr, rowIndex, colIndex, the_realPart, lineNumber)) {
+    return false;
   }
   if (istr.eof ()) {
-    if (tolerant) {
-      return false;
-    }
-    else {
-      std::ostringstream os;
-      os << "No more data after real value on line "
-         << lineNumber << " of input";
-      throw std::invalid_argument (os.str ());
-    }
+    return false;
   }
   istr >> the_imagPart;
   if (istr.fail ()) {
-    if (tolerant) {
-      return false;
-    }
-    else {
-      std::ostringstream os;
-      os << "Failed to get imaginary value from line "
-         << lineNumber << " of input";
-      throw std::invalid_argument (os.str ());
-    }
+    return false;
   }
   realPart = the_realPart;
   imagPart = the_imagPart;
@@ -187,7 +158,6 @@ struct ReadLine {
   ///   stream to read.
   /// \param lineNumber [in] Current line number in the file or input
   ///   stream.
-  /// \param tolerant [in] Whether to read tolerantly.
   /// \param errStrm [in] If not NULL, print any error messages to
   ///   this stream.
   /// \param debug [in] If true, print debug messages to \c *errStrm.
@@ -197,7 +167,6 @@ struct ReadLine {
   readLine (std::function<int (const GO, const GO, const SC&)> processTriple,
             const std::string& line,
             const std::size_t lineNumber,
-            const bool tolerant = false,
             std::ostream* errStrm = NULL,
             const bool debug = false);
 };
@@ -225,7 +194,6 @@ struct ReadLine<SC, GO, true> {
   ///   stream to read.
   /// \param lineNumber [in] Current line number in the file or input
   ///   stream.
-  /// \param tolerant [in] Whether to read tolerantly.
   /// \param errStrm [in] If not NULL, print any error messages to
   ///   this stream.
   /// \param debug [in] If true, print debug messages to \c *errStrm.
@@ -235,50 +203,57 @@ struct ReadLine<SC, GO, true> {
   readLine (std::function<int (const GO, const GO, const SC&)> processTriple,
             const std::string& line,
             const std::size_t lineNumber,
-            const bool tolerant = false,
-            std::ostream* errStrm = NULL,
-            const bool debug = false)
+            std::ostream* errStrm = nullptr)
   {
     using ::Teuchos::MatrixMarket::checkCommentLine;
     typedef typename ::Kokkos::Details::ArithTraits<SC>::mag_type real_type;
     using std::endl;
+    const char rawPrefix[] = "readLine (complex): ";
 
     GO rowInd, colInd;
     real_type realPart, imagPart;
     std::istringstream istr (line);
     bool success = true;
+    bool threw = false;
     try {
       // Use the version of this function in this file, not the
       // version in Teuchos_MatrixMarket_generic.hpp, because the
       // latter only exists if HAVE_TEUCHOS_COMPLEX is defined.
       success = readComplexData (istr, rowInd, colInd, realPart, imagPart,
-                                 lineNumber, tolerant);
+                                 lineNumber);
     }
     catch (std::exception& e) {
-      success = false;
-      if (errStrm != NULL) {
+      threw = true;
+      if (errStrm != nullptr) {
         std::ostringstream os;
-        os << "readLine: readComplexData threw an exception: " << e.what ()
-           << endl;
+        os << rawPrefix << "readComplexData threw: " << e.what () << endl;
         *errStrm << os.str ();
       }
     }
 
+    if (errStrm != nullptr) {
+      std::ostringstream os;
+      if (success) {
+	os << rawPrefix << "readComplex got entry: "
+	   << "row: " << rowInd
+	   << ", col: " << colInd
+	   << ", realPart: " << realPart
+	   << ", imagPart: " << imagPart
+	   << endl;
+      }
+      else if (! threw) {
+	os << rawPrefix << "readComplex returned but failed" << endl;
+      }
+      *errStrm << os.str ();
+    }
+    
     if (success) {
-      // if (debug && errStrm != NULL) {
-      //   std::ostringstream os;
-      //   os << "readLine: Got entry: row=" << rowInd << ", col=" << colInd
-      //      << ", realPart=" << realPart << ", imagPart=" << imagPart
-      //      << std::endl;
-      //   *errStrm << os.str ();
-      // }
-      // This line may have side effects.
+      // The user's closure may have side effects.
       const int errCode =
         processTriple (rowInd, colInd, SC (realPart, imagPart));
-      if (errCode != 0 && errStrm != NULL) {
-        std::ostringstream os;
-        os << "readLine: processTriple returned " << errCode << " != 0."
-           << endl;
+      if (errStrm != nullptr) {
+        std::ostringstream os;	
+	os << rawPrefix << "processTriple returned " << errCode << endl;
         *errStrm << os.str ();
       }
       return errCode;
@@ -312,7 +287,6 @@ struct ReadLine<SC, GO, false> {
   ///   stream to read.
   /// \param lineNumber [in] Current line number in the file or input
   ///   stream.
-  /// \param tolerant [in] Whether to read tolerantly.
   /// \param errStrm [in] If not NULL, print any error messages to
   ///   this stream.
   /// \param debug [in] If true, print debug messages to \c *errStrm.
@@ -322,7 +296,6 @@ struct ReadLine<SC, GO, false> {
   readLine (std::function<int (const GO, const GO, const SC&)> processTriple,
             const std::string& line,
             const std::size_t lineNumber,
-            const bool tolerant = false,
             std::ostream* errStrm = NULL,
             const bool debug = false)
   {
@@ -335,8 +308,7 @@ struct ReadLine<SC, GO, false> {
     std::istringstream istr (line);
     bool success = true;
     try {
-      success = readRealData (istr, rowInd, colInd, val,
-                              lineNumber, tolerant);
+      success = readRealData (istr, rowInd, colInd, val, lineNumber);
     }
     catch (std::exception& e) {
       success = false;
@@ -390,7 +362,6 @@ struct ReadLine<SC, GO, false> {
 ///   stream to read.
 /// \param lineNumber [in] Current line number in the file or input
 ///   stream.
-/// \param tolerant [in] Whether to read tolerantly.
 /// \param errStrm [in] If not NULL, print any error messages to this
 ///   stream.
 /// \param debug [in] If true, print debug messages to \c *errStrm.
@@ -401,28 +372,35 @@ int
 readLine (std::function<int (const GO, const GO, const SC&)> processTriple,
           const std::string& line,
           const std::size_t lineNumber,
-          const bool tolerant = false,
           std::ostream* errStrm = NULL,
           const bool debug = false)
 {
   return ReadLine<SC, GO>::readLine (processTriple, line, lineNumber,
-                                     tolerant, errStrm, debug);
+                                     errStrm, debug);
 }
 
-/// \brief Read at most numTriplesToRead triples from the given Matrix
-///   Market input stream, and pass along any resulting matrix entries
-///   to the given closure.
+/// \brief Read sparse matrix entries, one per line, from the given stream.
 ///
-/// The line must be a valid Matrix Market line, not a comment.
+/// With respect to MPI, this is a <i>local</i> operation.  That is:
+///
+/// <ul>
+/// <li>You may call this on <i>any</i> MPI process, as long as that
+///   process can read from the given input stream.</li>
+///
+/// <li>The calling process will read entries from the stream and
+///   add them to its local data structure, as if calling
+///   sumIntoGlobalValue.</li>
+///
+/// <li>It's a really bad idea to use the same input stream on all
+///   processes.  That will give you incorrect results, since each
+///   process will read the same entries from the same file and sum
+///   them in redundantly. </li>
+/// </ul>
 ///
 /// \tparam SC The type of the value of each matrix entry.
 /// \tparam GO The type of each (global) index of each matrix entry.
 ///
 /// \param inputStream [in/out] Input stream from which to read.
-/// \param curLineNum [in/out] Current line number in the input stream.
-/// \param numTriplesRead [out] On output: Number of matrix triples
-///   (row index, column index, value) successfully read from the
-///   input stream on this call to the function.x
 /// \param processTriple [in] Closure, generally with side effects,
 ///   that takes in and stores off a sparse matrix entry.  First
 ///   argument is the (global) row index, second argument is the
@@ -430,106 +408,47 @@ readLine (std::function<int (const GO, const GO, const SC&)> processTriple,
 ///   entry.  The closure must NOT do MPI communication.  Return value
 ///   is an error code, that is zero if and only if the closure
 ///   succeeded.
+/// \param curLineNum [in/out] Current line number in the input stream.
+/// \param numValid [in/out] Running total number of valid entries
+///   (triples) read.  This counts entries with the same row and
+///   column index as separate.
+/// \param numInvalid [in/out] Running total number of invalid,
+///   erroneous entries read.
+/// \param numErr [in/out] Running total number of errors reported by
+///   the closure \c processTriple.
 /// \param maxNumTriplesToRead [in] Maximum number of triples to read
 ///   from the input stream on this call of the function.  This is a
 ///   strict upper bound for numTriplesRead (see above).
-/// \param tolerant [in] Whether to read tolerantly.
-/// \param errStrm [in] If not NULL, print any error messages to this
-///   stream.
-/// \param debug [in] If true, print debug messages to \c *errStrm.
-///
-/// \return Error code; 0 if and only if success.
 template<class SC, class GO>
-int
+void
 readTriples (std::istream& inputStream,
-             std::size_t& curLineNum,
-             std::size_t& numTriplesRead,
              std::function<int (const GO, const GO, const SC&)> processTriple,
-             const std::size_t maxNumTriplesToRead,
-             const bool tolerant = false,
-             std::ostream* errStrm = NULL,
-             const bool debug = false)
+             std::size_t& curLineNum,
+             std::size_t& numValid,
+	     std::size_t& numInvalid,
+	     std::size_t& numErr,
+             const std::size_t maxNumEntriesToRead)
 {
-  using Teuchos::MatrixMarket::checkCommentLine;
-  using std::endl;
-  using std::size_t;
-
-  numTriplesRead = 0; // output argument only
-  if (inputStream.eof ()) {
-    return 0; // no error, just nothing left to read
-  }
-  else if (inputStream.fail ()) {
-    if (errStrm != NULL) {
-      *errStrm << "Input stream reports a failure (not the same as "
-        "end-of-file)." << endl;
-    }
-    return -1;
-  }
-
+  GO row;
+  GO col;
+  SC val;
   std::string line;
-  std::vector<size_t> badLineNumbers;
-  int errCode = 0; // 0 means success
 
-  bool inputStreamCanStillBeRead = std::getline (inputStream, line).good ();
-  ++curLineNum; // we read the line; we can't put it back
-  while (inputStreamCanStillBeRead && numTriplesRead < maxNumTriplesToRead) {
-    // if (debug && errStrm != NULL) {
-    //   std::ostringstream os;
-    //   os << "readTriples: Got line: \"" << line << "\"" << std::endl;
-    //   *errStrm << os.str ();
-    // }
-    size_t start, size;
-
-    const bool isCommentLine =
-      checkCommentLine (line, start, size, curLineNum, tolerant);
-    if (isCommentLine) {
-      // Move on to the next line, if there is a next line.
-      inputStreamCanStillBeRead = std::getline (inputStream, line).good ();
-      ++curLineNum; // we read another line; we can't put it back
-      continue; // move on to the next line
-    }
-    else { // not a comment line; should have a sparse matrix entry
-      const std::string theLine = line.substr (start, size);
-      // If the line has a valid sparse matrix entry, extract it and
-      // hand it off to the processTriple closure.
-      const int curErrCode =
-        readLine (processTriple, theLine, curLineNum, tolerant, errStrm, debug);
-      if (curErrCode != 0) {
-        errCode = curErrCode;
-        badLineNumbers.push_back (curLineNum);
-      }
-      else {
-        ++numTriplesRead;
-      }
-      if (numTriplesRead < maxNumTriplesToRead) {
-        inputStreamCanStillBeRead = std::getline (inputStream, line).good ();
-      }
-    }
-  } // while there are lines to read and we need more triples
-
-  if (errCode != 0 && errStrm != NULL) {
-    const size_t numBadLines = badLineNumbers.size ();
-    *errStrm << "Encountered " << numBadLines << " bad line"
-             << (numBadLines != size_t (1) ? "s" : "")
-             << ": [";
-    for (size_t k = 0; k < numBadLines; ++k) {
-      *errStrm << badLineNumbers[k];
-      if (k + 1 < numBadLines) {
-        *errStrm << ", ";
-      }
-    }
-    *errStrm << "]" << endl;
+  if (inputStream.eof () || inputStream.fail ()) {
+    return;
   }
-  if (! inputStream.eof () && inputStream.fail ()) {
-    if (errCode == 0) {
-      errCode = -1;
+  while (numValid < maxNumEntriesToRead && std::getline (inputStream, line)) {
+    ++curLineNum; // we did actually get a line
+    const EReadEntryResult result = readCooMatrixEntry (row, col, val, line);
+    if (result == READ_ENTRY_VALID) {
+      ++numValid;
+      const int errCode = processTriple (row, col, val);
+      numErr += (errCode == 0 ? 0 : 1);
     }
-    if (errStrm != NULL) {
-      *errStrm << "The input stream is not at end-of-file, "
-        "but is in a bad state." << endl;
+    else if (result == READ_ENTRY_ERROR) {
+      ++numInvalid;
     }
   }
-  return errCode;
 }
 
 /// \brief Read at most maxNumEntPerMsg sparse matrix entries from the
@@ -542,8 +461,11 @@ readTriples (std::istream& inputStream,
 ///
 /// \param inputStream [in/out] Input stream from which to read.
 /// \param curLineNum [in/out] Current line number in the input stream.
-/// \param numEntRead [out] Number of matrix entries successfully read
-///   from the input stream on this call of the function.
+/// \param numValid [in/out] Running total number of valid entries
+///   (triples) read.  This counts entries with the same row and
+///   column index as separate.
+/// \param numInvalid [in/out] Running total number of invalid,
+///   erroneous entries read.
 /// \param sizeBuf [in/out] Array of length 1, for sending message size.
 /// \param msgBuf [in/out] Message buffer; to be resized as needed.
 /// \param rowInds [out] Row indices read from the file.
@@ -554,14 +476,14 @@ readTriples (std::istream& inputStream,
 ///   function.
 /// \param destRank [in] Rank of the process where to send the triples.
 /// \param comm [in] Communicator to use for sending the triples.
-/// \param tolerant [in] Whether to read tolerantly.
-/// \param errStrm [in] If not NULL, print any error messages to this
+/// \param errStr [in] If not nullptr, print debug output to this
 ///   stream.
 template<class SC, class GO>
 int
 readAndSendOneBatchOfTriples (std::istream& inputStream,
                               std::size_t& curLineNum,
-                              std::size_t& numEntRead,
+                              std::size_t& numValid,
+			      std::size_t& numInvalid,
                               ::Teuchos::ArrayRCP<int>& sizeBuf,
                               ::Teuchos::ArrayRCP<char>& msgBuf,
                               std::vector<GO>& rowInds,
@@ -570,23 +492,28 @@ readAndSendOneBatchOfTriples (std::istream& inputStream,
                               const std::size_t maxNumEntPerMsg,
                               const int destRank,
                               const ::Teuchos::Comm<int>& comm,
-                              const bool tolerant = false,
-                              std::ostream* errStrm = NULL,
-                              const bool debug = false)
+                              std::ostream* errStrm = nullptr)
 {
   using ::Tpetra::Details::countPackTriplesCount;
   using ::Tpetra::Details::countPackTriples;
   using ::Tpetra::Details::packTriplesCount;
   using ::Tpetra::Details::packTriples;
+  using ::Kokkos::ArithTraits;  
   using ::Teuchos::isend;
   using std::endl;
+  const char rawPrefix[] = "readAndSendOneBatchOfTriples: ";
 
-  using ::Kokkos::ArithTraits;
-  // constexpr int sizeTag = 42 + (ArithTraits<SC>::is_complex ? 100 : 0);
-  // constexpr int msgTag = 43 + (ArithTraits<SC>::is_complex ? 100 : 0);
+  std::unique_ptr<std::string> prefix;
+  if (errStrm != nullptr) {
+    std::ostringstream os;
+    os << "Proc " << comm.getRank () << ": " << rawPrefix;
+    prefix = std::unique_ptr<std::string> (new std::string (os.str ()));
+    os << "Start" << endl;
+    *errStrm << os.str () << endl;
+  }
+
   constexpr int sizeTag = 42;
   constexpr int msgTag = 43;
-  //constexpr int srcRank = 0;
   int errCode = 0;
 
   // This doesn't actually deallocate memory; it just changes the size
@@ -607,167 +534,111 @@ readAndSendOneBatchOfTriples (std::istream& inputStream,
       }
       return 0;
     };
-  numEntRead = 0; // output argument
-  errCode = readTriples<SC, GO> (inputStream, curLineNum, numEntRead,
-                                 processTriple, maxNumEntPerMsg, tolerant,
-                                 errStrm, debug);
-  if (debug && errStrm != NULL) {
+  std::size_t numProcessTripleErrs = 0;
+  readTriples<SC, GO> (inputStream, processTriple, curLineNum,
+		       numValid, numInvalid, numProcessTripleErrs,
+		       maxNumEntPerMsg);
+  if (errStrm != nullptr) {
     std::ostringstream os;
-    os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-       << ", GO=" << typeid (GO).name () << ": "
-       << "readAndSendOneBatchOfTriples: readTriples read "
-       << numEntRead << " matrix entries, and returned errCode="
-       << errCode << "." << std::endl;
+    os << *prefix << "readTriples reports: numValid: " << numValid
+       << ", numInvalid: "  << numInvalid
+       << ", numProcessTripleErrs: " << numProcessTripleErrs << endl;
     *errStrm << os.str ();
   }
-  if (numEntRead != rowInds.size () ||
-      numEntRead != colInds.size () ||
-      numEntRead != vals.size ()) {
-    if (errStrm != NULL) {
-      *errStrm << "readTriples size results are not consistent.  "
-               << "numEntRead = " << numEntRead
-               << ", rowInds.size() = " << rowInds.size ()
-               << ", colInds.size() = " << colInds.size ()
-               << ", and vals.size() = " << vals.size () << "."
-               << std::endl;
-    }
-    if (errCode == 0) {
-      errCode = -1;
-    }
+  if (numInvalid != 0) {  
+    errCode = errCode - 1;
+  }
+  if (numProcessTripleErrs != 0) {
+    errCode = errCode - 2;
   }
 
   // We don't consider reading having "failed" if we've reached
   // end-of-file before reading maxNumEntPerMsg entries.  It's OK if
   // we got fewer triples than that.  Furthermore, we have to send at
   // least one message to the destination process, even if the read
-  // from the file failed.
+  // from the file failed.  Always send any triples if we have them,
+  // even if there was an error reading.  However, errors in packing
+  // make it impossible or unsafe to send anything.
 
-  if (numEntRead == 0 || errCode != 0) {
-    // Send a message size of zero to the receiving process, to tell
-    // it that we have no triples to send, or that there was an error
-    // reading.  The latter just means that we "go through the
-    // motions," then broadcast the error code.
+  if (numValid == 0) {
+    // Tell the receiving process that we have no triples to send.
     sizeBuf[0] = 0;
-    if (debug && errStrm != NULL) {
-      std::ostringstream os;
-      os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-         << ", GO=" << typeid (GO).name () << ": "
-         << "Post send (size=0, errCode=" << errCode << ") "
-         << "to " << destRank << " with tag " << sizeTag << endl;
-      *errStrm << os.str ();
-    }
     send (sizeBuf.getRawPtr (), 1, destRank, sizeTag, comm);
     return errCode;
   }
-  else { // we read a nonzero # of triples, without error
-    const int numEnt = static_cast<int> (numEntRead);
-    int countSize = 0; // output argument
-    int triplesSize = 0; // output argument
 
-    errCode = countPackTriplesCount (comm, countSize, errStrm);
-    // countSize should never be nonpositive, since we have to pack an
-    // integer size.
-    if (countSize <= 0 && errCode == 0) {
-      errCode = -1;
+  // We read a nonzero # of triples.
+  const int numEnt = static_cast<int> (numValid);
+  int countSize = 0; // output argument
+  int triplesSize = 0; // output argument
+
+  int countErrCode = countPackTriplesCount (comm, countSize, errStrm);
+  // countSize should never be nonpositive.
+  if (countErrCode != 0 || countSize <= 0) {
+    errCode = errCode - 4;
+    // Send zero to the receiving process, to tell it about the error.
+    sizeBuf[0] = 0;
+    send (sizeBuf.getRawPtr (), 1, destRank, sizeTag, comm);
+    return errCode;
+  }
+
+  // countPackTriplesCount succeeded
+  countErrCode = countPackTriples<SC, GO> (numEnt, comm, triplesSize, errStrm);
+  if (countErrCode != 0) {
+    errCode = errCode - 8;
+    // Send zero to the receiving process, to tell it about the error.
+    sizeBuf[0] = 0;
+    send (sizeBuf.getRawPtr (), 1, destRank, sizeTag, comm);
+    return errCode;
+  }
+
+  // countPackTriples succeeded; message packed & ready to send.
+  
+  // Send the message size (in bytes).  We can use a nonblocking
+  // send here, and try to overlap with message packing.
+  const int outBufSize = countSize + triplesSize;
+  sizeBuf[0] = outBufSize;
+  auto sizeReq = isend<int, int> (sizeBuf, destRank, sizeTag, comm);
+
+  msgBuf.resize (outBufSize);
+  char* outBuf = msgBuf.getRawPtr ();
+
+  // If anything goes wrong with packing, send the pack buffer
+  // anyway, since the receiving process expects a message.
+  int outBufCurPos = 0; // input/output argument
+  countErrCode = packTriplesCount (numEnt, outBuf, outBufSize,
+				   outBufCurPos, comm, errStrm);
+  if (countErrCode != 0) {
+    errCode = errCode - 16;
+  }
+  
+  if (errCode == 0) {
+    countErrCode = packTriples<SC, GO> (rowInds.data (), colInds.data (),
+					vals.data (), numEnt, outBuf,
+					outBufSize, outBufCurPos, comm,
+					errStrm);
+    if (countErrCode != 0) {
+      errCode = errCode - 32;
     }
+  }
+  auto msgReq = isend<int, char> (msgBuf, destRank, msgTag, comm);
 
-    if (errCode != 0) {
-      // Send zero to the receiving process, to tell it about the error.
-      sizeBuf[0] = 0;
-      if (debug && errStrm != NULL) {
-        std::ostringstream os;
-        os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-           << ", GO=" << typeid (GO).name () << ": "
-           << "Post send (size=0, error case) to " << destRank
-           << " with tag " << sizeTag << endl;
-        *errStrm << os.str ();
-      }
-      send (sizeBuf.getRawPtr (), 1, destRank, sizeTag, comm);
-      return errCode;
-    }
-    else { // countPackTriplesCount succeeded
-      errCode = countPackTriples<SC, GO> (numEnt, comm, triplesSize, errStrm);
-      if (errCode != 0) {
-        // Send a message size of zero to the receiving process, to
-        // tell it that there was an error counting.
-        sizeBuf[0] = 0;
-        if (debug && errStrm != NULL) {
-          std::ostringstream os;
-          os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-             << ", GO=" << typeid (GO).name () << ": "
-             << "Post send (size=0, error case) to " << destRank
-             << " with tag " << sizeTag << endl;
-          *errStrm << os.str ();
-        }
-        send (sizeBuf.getRawPtr (), 1, destRank, sizeTag, comm);
-        return errCode;
-      }
-      else { // countPackTriples succeeded; message packed & ready to send
-        // Send the message size (in bytes).  We can use a nonblocking
-        // send here, and try to overlap with message packing.
-        const int outBufSize = countSize + triplesSize;
-        sizeBuf[0] = outBufSize;
-        if (debug && errStrm != NULL) {
-          std::ostringstream os;
-          os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-             << ", GO=" << typeid (GO).name () << ": "
-             << "Post isend (size=" << sizeBuf[0] << ") to " << destRank
-             << " with tag " << sizeTag << endl;
-          *errStrm << os.str ();
-        }
-        auto sizeReq = isend<int, int> (sizeBuf, destRank, sizeTag, comm);
+  // Wait on the two messages.  It doesn't matter in what order we
+  // send them, because they have different tags.  The receiving
+  // process will wait on the first message first, in order to get the
+  // size of the second message.
+  sizeReq->wait ();
+  msgReq->wait ();
 
-        msgBuf.resize (outBufSize);
-        char* outBuf = msgBuf.getRawPtr ();
+  // This doesn't actually deallocate; it just resets sizes to zero.
+  rowInds.clear ();
+  colInds.clear ();
+  vals.clear ();
 
-        // If anything goes wrong with packing, send the pack buffer
-        // anyway, since the receiving process expects a message.
-        int outBufCurPos = 0; // input/output argument
-        errCode = packTriplesCount (numEnt, outBuf, outBufSize,
-                                    outBufCurPos, comm, errStrm);
-        if (errCode == 0) {
-          errCode = packTriples<SC, GO> (rowInds.data (), colInds.data (),
-                                         vals.data (), numEnt, outBuf,
-                                         outBufSize, outBufCurPos, comm,
-                                         errStrm);
-        }
-        if (debug && errStrm != NULL) {
-          std::ostringstream os;
-          os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-             << ", GO=" << typeid (GO).name () << ": "
-             << "Post isend (packed data) to " << destRank
-             << " with tag " << msgTag << endl;
-          *errStrm << os.str ();
-        }
-        auto msgReq = isend<int, char> (msgBuf, destRank, msgTag, comm);
-
-        // Wait on the two messages.  It doesn't matter in what order
-        // we send them, because they have different tags.  The
-        // receiving process will wait on the first message first, in
-        // order to get the size of the second message.
-        if (debug && errStrm != NULL) {
-          std::ostringstream os;
-          os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-             << ", GO=" << typeid (GO).name () << ": "
-             << "Wait on isend (size)" << endl;
-          *errStrm << os.str ();
-        }
-        sizeReq->wait ();
-        if (debug && errStrm != NULL) {
-          std::ostringstream os;
-          os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-             << ", GO=" << typeid (GO).name () << ": "
-             << "Wait on isend (packed data)" << endl;
-          *errStrm << os.str ();
-        }
-        msgReq->wait ();
-
-        // This doesn't actually deallocate; it just resets sizes to zero.
-        rowInds.clear ();
-        colInds.clear ();
-        vals.clear ();
-      }
-    }
+  if (errStrm != nullptr) {
+    std::ostringstream os;
+    os << *prefix << "Done!" << endl;
+    *errStrm << os.str ();
   }
   return errCode;
 }
@@ -779,7 +650,6 @@ readAndSendOneBatchOfTriples (std::istream& inputStream,
 ///
 /// \tparam SC The type of the value of each matrix entry.
 /// \tparam GO The type of each (global) index of each matrix entry.
-
 /// \tparam CommRequestPtr The type of a (smart) pointer to a
 ///   "communication request" returned by, e.g., ::Teuchos::ireceive.
 ///   It must implement operator= and operator->, and the thing to
@@ -804,7 +674,6 @@ readAndSendOneBatchOfTriples (std::istream& inputStream,
 /// \param srcRank [in] Rank of the process from which to receive the
 ///   matrix entries (triples).
 /// \param comm [in] Communicator to use for receiving the triples.
-/// \param tolerant [in] Whether to read tolerantly.
 /// \param errStrm [in] If not NULL, print any error messages to this
 ///   stream.
 template<class SC, class GO, class CommRequestPtr>
@@ -818,37 +687,35 @@ recvOneBatchOfTriples (std::vector<GO>& rowInds,
                        CommRequestPtr& sizeReq,
                        const int srcRank,
                        const ::Teuchos::Comm<int>& comm,
-                       const bool tolerant = false,
-                       std::ostream* errStrm = NULL,
-                       const bool debug = false)
+                       std::ostream* errStrm = nullptr)
 {
   using ::Tpetra::Details::unpackTriplesCount;
   using ::Tpetra::Details::unpackTriples;
   using ::Kokkos::ArithTraits;
+  using std::endl;
+  const char rawPrefix[] = "recvOneBatchOfTriples: ";
 
-  ////constexpr int sizeTag = 42 + (ArithTraits<SC>::is_complex ? 100 : 0);
-  //constexpr int msgTag = 43 + (ArithTraits<SC>::is_complex ? 100 : 0);
-  //constexpr int sizeTag = 42;
+  std::unique_ptr<std::string> prefix;
+  if (errStrm != nullptr) {
+    std::ostringstream os;
+    os << "Proc " << comm.getRank () << ": " << rawPrefix;
+    prefix = std::unique_ptr<std::string> (new std::string (os.str ()));
+    os << "Start" << endl;
+    *errStrm << os.str () << endl;
+  }
+
   constexpr int msgTag = 43;
   int errCode = 0; // return value
   numEnt = 0; // output argument
 
   // Wait on the ireceive we preposted before calling this function.
-  if (debug && errStrm != NULL) {
-    std::ostringstream os;
-    os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-       << ", GO=" << typeid (GO).name () << ": "
-       << "Wait on irecv (size)" << std::endl;
-    *errStrm << os.str ();
-  }
   sizeReq->wait ();
-  sizeReq = CommRequestPtr (NULL);
+  sizeReq = CommRequestPtr (nullptr);
   const int inBufSize = sizeBuf[0];
-  if (debug && errStrm != NULL) {
+
+  if (errStrm != nullptr) {
     std::ostringstream os;
-    os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-       << ", GO=" << typeid (GO).name () << ": "
-       << "Received size: sizeBuf[0]=" << sizeBuf[0] << std::endl;
+    os << "inBufSize: " << inBufSize << endl;
     *errStrm << os.str ();
   }
 
@@ -862,24 +729,24 @@ recvOneBatchOfTriples (std::vector<GO>& rowInds,
     msgBuf.resize (inBufSize);
     char* inBuf = msgBuf.getRawPtr ();
 
-    if (debug && errStrm != NULL) {
+    if (errStrm != nullptr) {
       std::ostringstream os;
-      os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-         << ", GO=" << typeid (GO).name () << ": "
-         << "Post irecv (packed data) " << "from " << srcRank
-         << " with tag " << msgTag << std::endl;
+      os << "Post irecv for data" << endl;
       *errStrm << os.str ();
     }
     auto msgReq = ::Teuchos::ireceive (msgBuf, srcRank, msgTag, comm);
-    if (debug && errStrm != NULL) {
+    if (errStrm != nullptr) {
       std::ostringstream os;
-      os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-         << ", GO=" << typeid (GO).name () << ": "
-         << "Wait on irecv (packed data)" << std::endl;
+      os << "Wait on irecv for data" << endl;
       *errStrm << os.str ();
     }
     msgReq->wait ();
 
+    if (errStrm != nullptr) {
+      std::ostringstream os;
+      os << "Call unpackTriplesCount" << endl;
+      *errStrm << os.str ();
+    }
     int inBufCurPos = 0; // output argument
     errCode = unpackTriplesCount (inBuf, inBufSize, inBufCurPos,
                                   numEnt, comm, errStrm);
@@ -891,6 +758,12 @@ recvOneBatchOfTriples (std::vector<GO>& rowInds,
                                        rowInds.data (), colInds.data (),
                                        vals.data (), numEnt, comm, errStrm);
     }
+  }
+
+  if (errStrm != nullptr) {
+    std::ostringstream os;
+    os << "Done! errCode: " << errCode << endl;
+    *errStrm << os.str ();
   }
   return errCode;
 }
@@ -918,8 +791,10 @@ recvOneBatchOfTriples (std::vector<GO>& rowInds,
 ///   current line number in the input stream.  (In the Matrix Market
 ///   format, sparse matrix entries cannot start until at least line 3
 ///   of the file.)  This is only valid on Process 0.
-/// \param totalNumEntRead [out] Total number of matrix entries
+/// \param numValid [out] Total number of valid matrix entries
 ///   (triples) read on Process 0.  This is only valid on Process 0.
+/// \param numInvalid [out] Total number of invalid, erroneous entries
+///   read.  This is only valid on Process 0.
 /// \param processTriple [in] Closure, generally with side effects,
 ///   that takes in and stores off a sparse matrix entry.  First
 ///   argument is the (global) row index, second argument is the
@@ -929,35 +804,43 @@ recvOneBatchOfTriples (std::vector<GO>& rowInds,
 ///   succeeded.  We intend for you to use this to call
 ///   CooMatrix::insertEntry.
 /// \param comm [in] Communicator to use for receiving the triples.
-/// \param tolerant [in] Whether to read tolerantly.
 /// \param errStrm [in] If not NULL, print any error messages to this
 ///   stream.
 ///
 /// \return Error code; 0 if and only if success.
 template<class SC, class GO>
 int
-readAndDealOutTriples (std::istream& inputStream, // only valid on Proc 0
-                       std::size_t& curLineNum, // only valid on Proc 0
-                       std::size_t& totalNumEntRead, // only valid on Proc 0
+readAndDealOutTriples (std::istream& inputStream,
+                       std::size_t& curLineNum,
+                       std::size_t& numValid,
+		       std::size_t& numInvalid,
                        std::function<int (const GO, const GO, const SC&)> processTriple,
                        const std::size_t maxNumEntPerMsg,
                        const ::Teuchos::Comm<int>& comm,
-                       const bool tolerant = false,
                        std::ostream* errStrm = NULL,
                        const bool debug = false)
 {
+  using Impl::readAndSendOneBatchOfTriples;
+  using Impl::readTriples;
   using Kokkos::ArithTraits;
   using std::endl;
   using std::size_t;
+  const char rawPrefix[] = "readAndDealOutTriples: ";
 
   constexpr int srcRank = 0;
-  //constexpr int sizeTag = 42 + (ArithTraits<SC>::is_complex ? 100 : 0);
-  ////constexpr int msgTag = 43 + (ArithTraits<SC>::is_complex ? 100 : 0);
   constexpr int sizeTag = 42;
-  //constexpr int msgTag = 43;
   const int myRank = comm.getRank ();
   const int numProcs = comm.getSize ();
   int errCode = 0;
+
+  std::unique_ptr<std::string> prefix;
+  if (debug && errStrm != nullptr) {
+    std::ostringstream os;
+    os << "Proc " << myRank << ": " << rawPrefix;
+    prefix = std::unique_ptr<std::string> (new std::string (os.str ()));
+    os << "Start" << endl;
+    *errStrm << os.str () << endl;
+  }
 
   ::Teuchos::ArrayRCP<int> sizeBuf (1);
   ::Teuchos::ArrayRCP<char> msgBuf; // to be resized as needed
@@ -971,7 +854,8 @@ readAndDealOutTriples (std::istream& inputStream, // only valid on Proc 0
   colInds.reserve (maxNumEntPerMsg);
   vals.reserve (maxNumEntPerMsg);
 
-  totalNumEntRead = 0;
+  numValid = 0;
+  numInvalid = 0;
   if (myRank == srcRank) {
     // Loop around through all the processes, including this one, over
     // and over until we reach the end of the file, or an error occurs.
@@ -981,63 +865,41 @@ readAndDealOutTriples (std::istream& inputStream, // only valid on Proc 0
           ! inputStream.eof () && errCode == 0;
          destRank = (destRank + 1) % numProcs) {
 
-      size_t curNumEntRead = 0; // output argument of below
       if (destRank == srcRank) {
+	if (debug && errStrm != nullptr) {
+	  std::ostringstream os;
+	  os << *prefix << "Call readTriples" << endl;
+	  *errStrm << os.str () << endl;
+	}
         // We can read and process the triples directly.  We don't
         // need to use intermediate storage, because we don't need to
         // pack and send the triples.
-        const int readErrCode =
-          Impl::readTriples<SC, GO> (inputStream, curLineNum, curNumEntRead,
-                                     processTriple, maxNumEntPerMsg, tolerant,
-                                     errStrm, debug);
-        if (debug && errStrm != NULL) {
-          std::ostringstream os;
-          os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-             << ", GO=" << typeid (GO).name () << ": "
-             << "(dest=src) readTriples returned curNumEntRead="
-             << curNumEntRead << ", errCode=" << readErrCode << endl;
-          *errStrm << os.str ();
-        }
-        errCode = (readErrCode != 0) ? readErrCode : errCode;
+	std::size_t numErr = 0;
+	readTriples (inputStream, processTriple, curLineNum, numValid,
+		     numInvalid, numErr, maxNumEntPerMsg);
+	if (numErr != 0) {
+	  errCode = errCode - 64;
+	}
       }
       else {
-        if (false && debug && errStrm != NULL) {
-          std::ostringstream os;
-          os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-             << ", GO=" << typeid (GO).name () << ": "
-             << "Calling readAndSend... with destRank=" << destRank << endl;
-          *errStrm << os.str ();
-        }
+	if (debug && errStrm != nullptr) {
+	  std::ostringstream os;
+	  os << *prefix << "Call readAndSendOneBatchOfTriples" << endl;
+	  *errStrm << os.str () << endl;
+	}
         // Read, pack, and send the triples to destRank.
         const int readAndSendErrCode =
-          Impl::readAndSendOneBatchOfTriples<SC, GO> (inputStream, curLineNum,
-                                                      curNumEntRead,
-                                                      sizeBuf, msgBuf,
-                                                      rowInds, colInds, vals,
-                                                      maxNumEntPerMsg, destRank,
-                                                      comm, tolerant, errStrm,
-                                                      debug);
-        totalNumEntRead += curNumEntRead;
-        if (debug && errStrm != NULL) {
-          std::ostringstream os;
-          os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-             << ", GO=" << typeid (GO).name () << ": "
-             << "readAndSend... with destRank=" << destRank
-             << " returned curNumEntRead=" << curNumEntRead
-             << ", errCode=" << readAndSendErrCode << endl;
-          *errStrm << os.str ();
-        }
-        errCode = (readAndSendErrCode != 0) ? readAndSendErrCode : errCode;
-        if (readAndSendErrCode == 0 && curNumEntRead == 0) {
+          readAndSendOneBatchOfTriples (inputStream, curLineNum,
+					numValid, numInvalid,
+					sizeBuf, msgBuf,
+					rowInds, colInds, vals,
+					maxNumEntPerMsg, destRank,
+					comm, errStrm);
+	if (readAndSendErrCode != 0) {
+	  errCode = errCode - 128;
+	}
+        if (readAndSendErrCode == 0 && numValid == 0) {
           lastMessageWasLegitZero = true;
-          if (debug && errStrm != NULL) {
-            std::ostringstream os;
-            os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-               << ", GO=" << typeid (GO).name () << ": "
-               << "Last send to " << destRank << " with tag " << sizeTag
-               << " was legit zero, counts as termination" << endl;
-            *errStrm << os.str ();
-          }
         }
       }
     } // loop around through processes until done reading file, or error
@@ -1056,15 +918,6 @@ readAndDealOutTriples (std::istream& inputStream, // only valid on Proc 0
     const int startRank = lastMessageWasLegitZero ? (destRank+1) : destRank;
     for (int outRank = startRank; outRank < numProcs; ++outRank) {
       if (outRank != srcRank) {
-        if (debug && errStrm != NULL) {
-          std::ostringstream os;
-          os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-             << ", GO=" << typeid (GO).name () << ": "
-             << "Post send (size, termination msg) to " << outRank
-             << " with tag " << sizeTag << "(was last message legit zero? "
-             << (lastMessageWasLegitZero ? "true" : "false") << ")" << endl;
-          *errStrm << os.str ();
-        }
         sizeBuf[0] = 0;
         ::Teuchos::send (sizeBuf.getRawPtr (), 1, outRank, sizeTag, comm);
       }
@@ -1072,31 +925,29 @@ readAndDealOutTriples (std::istream& inputStream, // only valid on Proc 0
   }
   else {
     while (true) {
+      if (debug && errStrm != nullptr) {
+	std::ostringstream os;
+	os << *prefix << "Prepost irecv" << endl;
+	*errStrm << os.str () << endl;
+      }
       // Prepost a message to receive the size (in bytes) of the
       // incoming packet.
       sizeBuf[0] = 0; // superfluous, but safe
-      if (debug && errStrm != NULL) {
-        std::ostringstream os;
-        os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-           << ", GO=" << typeid (GO).name () << ": "
-           << "Post irecv (size) from " << srcRank
-           << " with tag " << sizeTag << std::endl;
-        *errStrm << os.str ();
-      }
       auto sizeReq = ::Teuchos::ireceive (sizeBuf, srcRank, sizeTag, comm);
-
+      if (debug && errStrm != nullptr) {
+	std::ostringstream os;
+	os << *prefix << "Call recvOneBatchOfTriples" << endl;
+	*errStrm << os.str () << endl;
+      }
       int numEnt = 0; // output argument
       const int recvErrCode =
         Impl::recvOneBatchOfTriples (rowInds, colInds, vals, numEnt, sizeBuf,
-                                     msgBuf, sizeReq, srcRank, comm, tolerant,
-                                     errStrm, debug);
-      if (debug && errStrm != NULL) {
-        std::ostringstream os;
-        os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-           << ", GO=" << typeid (GO).name () << ": "
-           << "recvOneBatchOfTriples returned numEnt=" << numEnt
-           << ", errCode=" << recvErrCode << endl;
-        *errStrm << os.str ();
+                                     msgBuf, sizeReq, srcRank, comm, errStrm);
+      if (debug && errStrm != nullptr) {
+	std::ostringstream os;
+	os << *prefix << "recvErrCode: " << recvErrCode
+	   << ", numEnt: " << numEnt << endl;
+	*errStrm << os.str () << endl;
       }
       errCode = (recvErrCode != 0) ? recvErrCode : errCode;
 
@@ -1104,7 +955,7 @@ readAndDealOutTriples (std::istream& inputStream, // only valid on Proc 0
           numEnt != static_cast<int> (colInds.size ()) ||
           numEnt != static_cast<int> (vals.size ())) {
         errCode = (errCode == 0) ? -1 : errCode;
-        if (errStrm != NULL) {
+        if (errStrm != nullptr) {
           *errStrm << "recvOneBatchOfTriples produced inconsistent data sizes.  "
                    << "numEnt = " << numEnt
                    << ", rowInds.size() = " << rowInds.size ()
@@ -1120,6 +971,11 @@ readAndDealOutTriples (std::istream& inputStream, // only valid on Proc 0
         break;
       }
 
+      if (debug && errStrm != nullptr) {
+	std::ostringstream os;
+	os << *prefix << "Process triples" << endl;
+	*errStrm << os.str () << endl;
+      }
       for (int k = 0; k < numEnt && errCode == 0; ++k) {
         const int curErrCode = processTriple (rowInds[k], colInds[k], vals[k]);
         errCode = (curErrCode == 0) ? errCode : curErrCode;
@@ -1127,13 +983,12 @@ readAndDealOutTriples (std::istream& inputStream, // only valid on Proc 0
     } // while we still get messages from srcRank
   }
 
-  if (debug && errStrm != NULL) {
+  if (debug && errStrm != nullptr) {
     std::ostringstream os;
-    os << "Proc " << comm.getRank () << ", SC=" << typeid (SC).name ()
-       << ", GO=" << typeid (GO).name () << ": "
-       << "Done with send/recv loop" << endl;
-    *errStrm << os.str ();
+    os << *prefix << "All-reduce for error code" << endl;
+    *errStrm << os.str () << endl;
   }
+
   // Do a bitwise OR to get an error code that is nonzero if and only
   // if any process' local error code is nonzero.
   using ::Teuchos::outArg;
@@ -1141,6 +996,12 @@ readAndDealOutTriples (std::istream& inputStream, // only valid on Proc 0
   using ::Teuchos::reduceAll;
   const int lclErrCode = errCode;
   reduceAll<int, int> (comm, REDUCE_BOR, lclErrCode, outArg (errCode));
+
+  if (debug && errStrm != nullptr) {
+    std::ostringstream os;
+    os << *prefix << "Done! errCode: " << errCode << endl;
+    *errStrm << os.str () << endl;
+  }
   return errCode;
 }
 

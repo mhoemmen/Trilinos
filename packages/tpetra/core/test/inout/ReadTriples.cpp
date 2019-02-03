@@ -40,8 +40,9 @@
 // @HEADER
 
 #include "Tpetra_TestingUtilities.hpp"
-#include "Tpetra_Details_ReadTriples.hpp"
+#include "Tpetra_Details_Behavior.hpp"
 #include "Tpetra_Details_gathervPrint.hpp"
+#include "Tpetra_Details_ReadTriples.hpp"
 #include "Tpetra_Map.hpp"
 #include "Teuchos_CommHelpers.hpp"
 #ifdef HAVE_TPETRACORE_MPI
@@ -151,8 +152,8 @@ testReal (bool& success,
           const double expectedVals[], // on the calling process
           const std::size_t expectedNumEnt, // on the calling process
           const Comm<int>& comm,
-          const bool debug = false,
-          std::ostream* errStrm = NULL)
+          const bool verbose,
+          std::ostream& errStrm)
 {
   using Tpetra::Details::readAndDealOutTriples;
   using Teuchos::outArg;
@@ -168,8 +169,7 @@ testReal (bool& success,
   int lclSuccess = 1;
   int gblSuccess = 0; // output argument
 
-  out << "Test readAndDealOutTriples for real-valued matrix entries" << endl;
-  Teuchos::OSTab tab1 (out);
+  out << "Test readAndDealOutTriples for real matrix entries" << endl;
 
   // The entries of the sparse matrix that live on the calling process.
   matrix_type myMatrixEntries;
@@ -178,6 +178,9 @@ testReal (bool& success,
   // the existing entry.
   std::function<int (const GO, const GO, const SC&)> insertEntry =
     [&myMatrixEntries] (const GO rowInd, const GO colInd, const SC& val) {
+
+    std::cerr << "*** " << rowInd << ", " << colInd << ", " << val << std::endl;
+    
     auto iter = myMatrixEntries.find ({rowInd, colInd});
     if (iter == myMatrixEntries.end ()) {
       myMatrixEntries.insert ({{rowInd, colInd}, val});
@@ -193,6 +196,7 @@ testReal (bool& success,
 
   std::size_t curLineNum = 0;
   std::size_t totalNumEntriesRead = 0;
+  std::size_t numInvalid = 0;
 
   // Keep this small, so that we can observe complete function
   // behavior.  If not less than the number of input lines, then
@@ -206,11 +210,10 @@ testReal (bool& success,
   //const std::size_t expectedNumLinesRead = 8;
   //const std::size_t expectedTotalNumEntriesRead = 7;
 
-  const bool tolerant = false;
   const int errCode =
     readAndDealOutTriples (inputStream, curLineNum, totalNumEntriesRead,
-                           insertEntry, maxNumEntriesPerMessage, comm,
-                           tolerant, errStrm, debug);
+			   numInvalid, insertEntry, maxNumEntriesPerMessage,
+			   comm, &errStrm, verbose);
   TEST_EQUALITY( errCode, 0 );
 
   lclSuccess = success ? 1 : 0;
@@ -226,8 +229,10 @@ testReal (bool& success,
     std::ostringstream os;
     os << "Proc " << myRank << ": Got matrix entries: [";
     std::size_t k = 0;
-    for (auto iter = myMatrixEntries.begin (); iter != myMatrixEntries.end (); ++iter, ++k) {
-      os << "{row=" << iter->first.row << ", col=" << iter->first.col << ", val=" << iter->second << "}";
+    for (auto iter = myMatrixEntries.begin (); iter != myMatrixEntries.end ();
+	 ++iter, ++k) {
+      os << "{row=" << iter->first.row << ", col=" << iter->first.col
+	 << ", val=" << iter->second << "}";
       if (k + 1 < myMatrixEntries.size ()) {
         os << ", ";
       }
@@ -271,6 +276,8 @@ testReal (bool& success,
   gblSuccess = 0; // output argument
   reduceAll<int, int> (comm, REDUCE_MIN, lclSuccess, outArg (gblSuccess));
   TEST_EQUALITY( gblSuccess, 1 );
+
+  out << "Done!" << endl;
 }
 
 
@@ -283,8 +290,8 @@ testComplex (bool& success,
              const std::complex<double> expectedVals[], // on the calling process
              const std::size_t expectedNumEnt, // on the calling process
              const Comm<int>& comm,
-             const bool debug = false,
-             std::ostream* errStrm = NULL)
+             const bool verbose,
+             std::ostream& errStrm)
 {
   using Tpetra::Details::readAndDealOutTriples;
   using Teuchos::outArg;
@@ -325,6 +332,7 @@ testComplex (bool& success,
 
   std::size_t curLineNum = 0;
   std::size_t totalNumEntriesRead = 0;
+  std::size_t numInvalid = 0;
 
   // Keep this small, so that we can observe complete function
   // behavior.  If not less than the number of input lines, then
@@ -338,11 +346,10 @@ testComplex (bool& success,
   //const std::size_t expectedNumLinesRead = 8;
   //const std::size_t expectedTotalNumEntriesRead = 7;
 
-  const bool tolerant = false;
   const int errCode =
     readAndDealOutTriples (inputStream, curLineNum, totalNumEntriesRead,
-                           insertEntry, maxNumEntriesPerMessage, comm,
-                           tolerant, errStrm, debug);
+			   numInvalid, insertEntry, maxNumEntriesPerMessage,
+			   comm, &errStrm, verbose);
   TEST_EQUALITY( errCode, 0 );
 
   lclSuccess = success ? 1 : 0;
@@ -405,16 +412,27 @@ testComplex (bool& success,
   TEST_EQUALITY( gblSuccess, 1 );
 }
 
-
 TEUCHOS_UNIT_TEST( ReadTriples, Real1 )
+{
+
+  
+}
+
+TEUCHOS_UNIT_TEST( ReadAndDealOutTriples, Real1 )
 {
   auto comm = Tpetra::TestingUtilities::getDefaultComm ();
   const int myRank = comm->getRank ();
   const int numProcs = comm->getSize ();
 
+  const bool verbose = ::Tpetra::Details::Behavior::verbose ();
+  std::ostream& out2 = verbose ? std::cerr : out;
+    
+  out2 << "Test: ReadAndDealOutTriples, Real1" << endl;
+
   TEST_EQUALITY( numProcs, 2 );
   if (numProcs != 2) {
     out << "This test requires exactly 2 MPI processes";
+    return;
   }
 
 #ifdef HAVE_TPETRACORE_MPI
@@ -436,9 +454,6 @@ TEUCHOS_UNIT_TEST( ReadTriples, Real1 )
   }
 #endif // HAVE_TPETRACORE_MPI
 
-  const bool debug = true;
-  std::ostream* errStrm = debug ? &std::cerr : NULL;
-
   if (myRank == 0) {
     const GO expectedRowInds[] = {1, 3, 9, 11};
     const GO expectedColInds[] = {2, 4, 10, 12};
@@ -447,7 +462,7 @@ TEUCHOS_UNIT_TEST( ReadTriples, Real1 )
     testReal (success, out, inputFileReal,
               expectedRowInds, expectedColInds,
               expectedVals, expectedNumEnt,
-              *comm, debug, errStrm);
+              *comm, verbose, out2);
   }
   else if (myRank == 1) {
     const GO expectedRowInds[] = {5, 7, 13};
@@ -457,7 +472,7 @@ TEUCHOS_UNIT_TEST( ReadTriples, Real1 )
     testReal (success, out, inputFileReal,
               expectedRowInds, expectedColInds,
               expectedVals, expectedNumEnt,
-              *comm, debug, errStrm);
+              *comm, verbose, out2);
   }
   else {
     const GO* const expectedRowInds = NULL;
@@ -467,12 +482,13 @@ TEUCHOS_UNIT_TEST( ReadTriples, Real1 )
     testReal (success, out, inputFileReal,
               expectedRowInds, expectedColInds,
               expectedVals, expectedNumEnt,
-              *comm, debug, errStrm);
+              *comm, verbose, out2);
   }
+  out2 << "Done!" << endl;
 }
 
 
-TEUCHOS_UNIT_TEST( ReadTriples, Real2 )
+TEUCHOS_UNIT_TEST( ReadAndDealOutTriples, Real2 )
 {
   auto comm = Tpetra::TestingUtilities::getDefaultComm ();
   const int myRank = comm->getRank ();
@@ -502,8 +518,8 @@ TEUCHOS_UNIT_TEST( ReadTriples, Real2 )
   }
 #endif // HAVE_TPETRACORE_MPI
 
-  const bool debug = true;
-  std::ostream* errStrm = debug ? &std::cerr : NULL;
+  const bool verbose = true;
+  std::ostream& errStrm = verbose ? std::cerr : out;
 
   if (myRank == 0) {
     const GO expectedRowInds[] = {1, 3, 9, 11};
@@ -513,7 +529,7 @@ TEUCHOS_UNIT_TEST( ReadTriples, Real2 )
     testReal (success, out, inputFileReal2,
               expectedRowInds, expectedColInds,
               expectedVals, expectedNumEnt,
-              *comm, debug, errStrm);
+              *comm, verbose, errStrm);
   }
   else if (myRank == 1) {
     const GO expectedRowInds[] = {5, 7};
@@ -523,7 +539,7 @@ TEUCHOS_UNIT_TEST( ReadTriples, Real2 )
     testReal (success, out, inputFileReal2,
               expectedRowInds, expectedColInds,
               expectedVals, expectedNumEnt,
-              *comm, debug, errStrm);
+              *comm, verbose, errStrm);
   }
   else {
     const GO* const expectedRowInds = NULL;
@@ -533,12 +549,12 @@ TEUCHOS_UNIT_TEST( ReadTriples, Real2 )
     testReal (success, out, inputFileReal2,
               expectedRowInds, expectedColInds,
               expectedVals, expectedNumEnt,
-              *comm, debug, errStrm);
+              *comm, verbose, errStrm);
   }
 }
 
 
-TEUCHOS_UNIT_TEST( ReadTriples, Real3 )
+TEUCHOS_UNIT_TEST( ReadAndDealOutTriples, Real3 )
 {
   auto comm = Tpetra::TestingUtilities::getDefaultComm ();
   const int myRank = comm->getRank ();
@@ -568,8 +584,8 @@ TEUCHOS_UNIT_TEST( ReadTriples, Real3 )
   }
 #endif // HAVE_TPETRACORE_MPI
 
-  const bool debug = true;
-  std::ostream* errStrm = debug ? &std::cerr : NULL;
+  const bool verbose = true;
+  std::ostream& errStrm = verbose ? std::cerr : out;
 
   if (myRank == 0) {
     const GO expectedRowInds[] = {1, 3};
@@ -579,7 +595,7 @@ TEUCHOS_UNIT_TEST( ReadTriples, Real3 )
     testReal (success, out, inputFileReal3,
               expectedRowInds, expectedColInds,
               expectedVals, expectedNumEnt,
-              *comm, debug, errStrm);
+              *comm, verbose, errStrm);
   }
   else if (myRank == 1) {
     const GO* const expectedRowInds = NULL;
@@ -589,7 +605,7 @@ TEUCHOS_UNIT_TEST( ReadTriples, Real3 )
     testReal (success, out, inputFileReal3,
               expectedRowInds, expectedColInds,
               expectedVals, expectedNumEnt,
-              *comm, debug, errStrm);
+              *comm, verbose, errStrm);
   }
   else {
     const GO* const expectedRowInds = NULL;
@@ -599,11 +615,11 @@ TEUCHOS_UNIT_TEST( ReadTriples, Real3 )
     testReal (success, out, inputFileReal3,
               expectedRowInds, expectedColInds,
               expectedVals, expectedNumEnt,
-              *comm, debug, errStrm);
+              *comm, verbose, errStrm);
   }
 }
 
-TEUCHOS_UNIT_TEST( ReadTriples, Complex )
+TEUCHOS_UNIT_TEST( ReadAndDealOutTriples, Complex )
 {
   auto comm = Tpetra::TestingUtilities::getDefaultComm ();
   const int myRank = comm->getRank ();
@@ -633,8 +649,8 @@ TEUCHOS_UNIT_TEST( ReadTriples, Complex )
   }
 #endif // HAVE_TPETRACORE_MPI
 
-  const bool debug = true;
-  std::ostream* errStrm = debug ? &std::cerr : NULL;
+  const bool verbose = true;
+  std::ostream& errStrm = verbose ? std::cerr : out;
 
   if (myRank == 0) {
     const GO expectedRowInds[] = {1, 3, 9, 11};
@@ -649,7 +665,7 @@ TEUCHOS_UNIT_TEST( ReadTriples, Complex )
     testComplex (success, out, inputFileComplex,
                  expectedRowInds, expectedColInds,
                  expectedVals, expectedNumEnt, *comm,
-                 debug, errStrm);
+                 verbose, errStrm);
   }
   else if (myRank == 1) {
     const GO expectedRowInds[] = {5, 7, 13};
@@ -663,7 +679,7 @@ TEUCHOS_UNIT_TEST( ReadTriples, Complex )
     testComplex (success, out, inputFileComplex,
                  expectedRowInds, expectedColInds,
                  expectedVals, expectedNumEnt, *comm,
-                 debug, errStrm);
+                 verbose, errStrm);
   }
   else {
     const GO* const expectedRowInds = NULL;
@@ -673,7 +689,7 @@ TEUCHOS_UNIT_TEST( ReadTriples, Complex )
     testComplex (success, out, inputFileComplex,
                  expectedRowInds, expectedColInds,
                  expectedVals, expectedNumEnt, *comm,
-                 debug, errStrm);
+                 verbose, errStrm);
   }
 }
 
