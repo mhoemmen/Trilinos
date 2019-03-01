@@ -588,7 +588,7 @@ ReturnType GmresPolySolMgr<ScalarType,MV,OP>::solve ()
     // Then the polynomial will be used as an operator for an outer solver.
     // Use outer solver parameter list passed in a sublist.
     Belos::GenericSolverFactory<ScalarType, MultiVec<ScalarType>, Operator<ScalarType> > factory;
-    RCP<SolverManager<ScalarType, MultiVec<ScalarType>, Operator<ScalarType> > > solver = factory.create( outerSolverType_, outerParams_ );
+    auto solver = factory.create( outerSolverType_, outerParams_ );
     TEUCHOS_TEST_FOR_EXCEPTION( solver == Teuchos::null, std::invalid_argument,
       "Belos::GmresPolySolMgr::solve(): Selected solver is not valid.");
 
@@ -623,8 +623,8 @@ ReturnType GmresPolySolMgr<ScalarType,MV,OP>::solve ()
   else if (hasOuterSolver_) {
 
     // There is no polynomial, just create the outer solver with the outerSolverType_ and outerParams_.
-    Belos::SolverFactory<ScalarType, MV, OP> factory;
-    RCP<SolverManager<ScalarType, MV, OP> > solver = factory.create( outerSolverType_, outerParams_ );
+    Belos::GenericSolverFactory<ScalarType, MV, OP> factory;
+    auto solver = factory.create( outerSolverType_, outerParams_ );
     TEUCHOS_TEST_FOR_EXCEPTION( solver == Teuchos::null, std::invalid_argument,
       "Belos::GmresPolySolMgr::solve(): Selected solver is not valid.");
 
