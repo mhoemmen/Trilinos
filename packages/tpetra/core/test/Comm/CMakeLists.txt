@@ -67,3 +67,13 @@ IF (Tpetra_ENABLE_CUDA AND Tpetra_INST_CUDA AND Tpetra_ASSUME_CUDA_AWARE_MPI)
     COMM mpi
     )
 ENDIF ()
+
+IF (Tpetra_ENABLE_CUDA AND Tpetra_INST_CUDA)
+  TRIBITS_ADD_EXECUTABLE_AND_TEST(
+    hostPinned
+    SOURCES
+      hostPinned
+    NUM_MPI_PROCS 2
+    COMM mpi
+    )
+ENDIF ()
