@@ -489,7 +489,7 @@ namespace Tpetra {
       }
       else { // if (restrictedMode && revOp == DoReverse) {
         const bool myMapLocallyFittedTransferSrcMap =
-          this->getMap ()->isLocallyFitted (* (transfer.getSourceMap ()));   
+          this->getMap ()->isLocallyFitted (* (transfer.getSourceMap ()));
         TEUCHOS_TEST_FOR_EXCEPTION
           (! myMapLocallyFittedTransferSrcMap, std::invalid_argument,
            "Tpetra::DistObject::" << modeString << ": For reverse-mode "
@@ -534,7 +534,7 @@ namespace Tpetra {
            "cannot have permutes in restricted mode ");
       }
     }
-    
+
     if (this->useNewInterface ()) {
       using ::Tpetra::Details::Behavior;
       // Do we need all communication buffers to live on host?
@@ -1407,7 +1407,7 @@ namespace Tpetra {
     // that if CM == INSERT || CM == REPLACE, the target object could
     // be write only.  We don't optimize for that here.
 
-    if (!restrictedMode && numSameIDs + permuteToLIDs.extent (0) != 0) {
+    if (! restrictedMode && numSameIDs + permuteToLIDs.extent (0) != 0) {
       // There is at least one GID to copy or permute.
       if (verbose) {
         std::ostringstream os;
@@ -1422,26 +1422,24 @@ namespace Tpetra {
       Teuchos::TimeMonitor copyAndPermuteMon (*copyAndPermuteTimer_);
 #endif // HAVE_TPETRA_TRANSFER_TIMERS
 
-      if (numSameIDs + permuteToLIDs.extent (0) != 0) {
-        // There is at least one GID to copy or permute.
-        if (verbose) {
-          std::ostringstream os;
-          os << *prefix << "2. copyAndPermuteNew" << endl;
-          std::cerr << os.str ();
-        }
-        this->copyAndPermuteNew (src, numSameIDs, permuteToLIDs,
-                                 permuteFromLIDs);
-        if (verbose) {
-          std::ostringstream os;
-          os << *prefix << "After copyAndPermuteNew:" << endl
-             << *prefix << "  "
-             << dualViewStatusToString (permuteToLIDs, "permuteToLIDs")
-             << endl
-             << *prefix << "  "
-             << dualViewStatusToString (permuteFromLIDs, "permuteFromLIDs")
-             << endl;
-          std::cerr << os.str ();
-        }
+      // There is at least one GID to copy or permute.
+      if (verbose) {
+        std::ostringstream os;
+        os << *prefix << "2. copyAndPermuteNew" << endl;
+        std::cerr << os.str ();
+      }
+      this->copyAndPermuteNew (src, numSameIDs, permuteToLIDs,
+                               permuteFromLIDs);
+      if (verbose) {
+        std::ostringstream os;
+        os << *prefix << "After copyAndPermuteNew:" << endl
+           << *prefix << "  "
+           << dualViewStatusToString (permuteToLIDs, "permuteToLIDs")
+           << endl
+           << *prefix << "  "
+           << dualViewStatusToString (permuteFromLIDs, "permuteFromLIDs")
+           << endl;
+        std::cerr << os.str ();
       }
     }
 
@@ -1829,13 +1827,6 @@ namespace Tpetra {
         Teuchos::TimeMonitor unpackAndCombineMon (*unpackAndCombineTimer_);
 #endif // HAVE_TPETRA_TRANSFER_TIMERS
 
-        // NOTE (mfh 26 Apr 2016) We don't actually need to sync the
-        // input DualViews, but they DO need to be most recently
-        // updated in the same memory space.
-        //
-        // FIXME (mfh 26 Apr 2016) Check that all input DualViews
-        // were most recently updated in the same memory space, and
-        // sync them to the same place (based on commOnHost) if not.
         this->unpackAndCombineNew (remoteLIDs, this->imports_,
                                    this->numImportPacketsPerLID_,
                                    constantNumPackets, distor, CM);
