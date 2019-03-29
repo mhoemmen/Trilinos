@@ -26,3 +26,9 @@ TRIBITS_ADD_EXECUTABLE(
   SOURCES localView.cpp
   COMM serial mpi
 )
+
+TRIBITS_ADD_EXECUTABLE(
+  commBuffers
+  SOURCES commBuffers.cpp
+  COMM mpi
+)
