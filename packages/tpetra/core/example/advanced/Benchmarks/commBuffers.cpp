@@ -41,19 +41,6 @@
 // @HEADER
 */
 
-// This test tests whether the MPI implementation that Trilinos uses
-// is CUDA aware.  See Trilinos GitHub issues #1571 and #1088 to learn
-// what it means for an MPI implementation to be "CUDA aware," and why
-// this matters for performance.
-//
-// The test will only build if CUDA is enabled.  If you want to
-// exercise this test, you must build Tpetra with CUDA enabled, and
-// set the environment variable TPETRA_ASSUME_CUDA_AWARE_MPI to some
-// true value (e.g., "1" or "TRUE").  If you set the environment
-// variable to some false value (e.g., "0" or "FALSE"), the test will
-// run but will pass trivially.  This means that you may control the
-// test's behavior at run time.
-
 #include "Tpetra_Core.hpp"
 #include "Tpetra_Details_Behavior.hpp"
 #include "Teuchos_CommHelpers.hpp"
@@ -62,15 +49,26 @@
 #include "Teuchos_TimeMonitor.hpp"
 #include "Teuchos_TypeNameTraits.hpp"
 #include "Kokkos_ArithTraits.hpp"
-#include "Kokkos_DualView.hpp"
+#include "Tpetra_Details_DualViewUtil.hpp"
 #include "Kokkos_TeuchosCommAdapters.hpp"
+#include <cstdlib>
 #include <type_traits>
 
 namespace { // (anonymous)
 
-#if ! defined(KOKKOS_ENABLE_CUDA) || ! defined(HAVE_TPETRA_INST_CUDA)
-#  error "Building this test requires that Trilinos was built with CUDA enabled, and that Tpetra_INST_CUDA:BOOL=ON.  The latter should be true by default if the former is true.  Thus, if Trilinos was built with CUDA enabled, then you must have set some nondefault CMake option."
-#endif // ! defined(KOKKOS_ENABLE_CUDA) && ! defined(HAVE_TPETRA_INST_CUDA)
+  template<class PacketType, class BufferDeviceType>
+  Kokkos::DualView<PacketType*, BufferDeviceType>
+  makeBufferDualView (const char label[], const size_t size)
+  {
+    using Tpetra::Details::view_alloc_no_init;
+    using dual_view_type = Kokkos::DualView<PacketType*, BufferDeviceType>;
+    using dev_view_type = typename dual_view_type::t_dev;
+    using host_view_type = typename dual_view_type::t_host;
+
+    dev_view_type d_view (view_alloc_no_init (label), size);
+    host_view_type h_view (view_alloc_no_init (label), size);
+    return dual_view_type (d_view, h_view);
+  }
 
   using std::endl;
 
@@ -104,12 +102,26 @@ namespace { // (anonymous)
     return static_cast<OutputScalarType> (static_cast<mag_type> (x));
   }
 
+  template<class ExecutionSpace>
+  struct FenceDeviceBeforeMpiDefault {
+#ifdef KOKKOS_ENABLE_CUDA
+    static constexpr bool value =
+      std::is_same<typename ExecutionSpace::execution_space,
+                   Kokkos::Cuda>::value;
+#else
+    static constexpr bool value = false;
+#endif // KOKKOS_ENABLE_CUDA
+  };
+
   template<class BufferDualViewType>
   void
   packAndPrepare (BufferDualViewType& sendBuf,
                   const typename BufferDualViewType::non_const_value_type&
                     startValue,
-                  const bool fenceDeviceBeforeMpi)
+                  const bool fenceDeviceBeforeMpi =
+                    FenceDeviceBeforeMpiDefault<
+                      typename BufferDualViewType::t_dev::execution_space
+                    >::value)
   {
     using index_type = decltype (sendBuf.extent (0));
     using value_type =
@@ -128,8 +140,7 @@ namespace { // (anonymous)
         sendBuf.d_view(k) = startVal + toScalar<value_type> (k);
       });
 
-    if (std::is_same<execution_space, Kokkos::Cuda>::value &&
-        fenceDeviceBeforeMpi) {
+    if (fenceDeviceBeforeMpi) {
       execution_space::fence ();
     }
   }
@@ -196,8 +207,9 @@ namespace { // (anonymous)
   }
 
   struct CmdLineArgs {
+    std::string packetType = "double";
     int numTrials = 1000;
-    int bufSize = 1000;
+    int bufSize = 1000; // divide by sizeof(PacketType)
     bool fenceDeviceBeforeMpi = true;
     bool success = true;
     bool printedHelp = false;
@@ -208,12 +220,16 @@ namespace { // (anonymous)
     using Teuchos::CommandLineProcessor;
 
     CmdLineArgs args;
-    CommandLineProcessor cmdp;
+    constexpr bool throwExceptions = false;
+    CommandLineProcessor cmdp (throwExceptions);
+    cmdp.setOption ("packet-type", &args.packetType,
+                    "Type of each entry of the communication buffer");
     cmdp.setOption ("num-trials", &args.numTrials,
                     "Number of times to repeat each "
                     "operation in a timing loop");
     cmdp.setOption ("buffer-size", &args.bufSize,
-                    "Communication buffer size on each process");
+                    "Communication buffer size (in bytes) "
+                    "on each process");
     cmdp.setOption ("sync-before-mpi", "no-sync-before-mpi",
                     &args.fenceDeviceBeforeMpi,
                     "Whether to sync (Kokkos fence) the device "
@@ -235,27 +251,35 @@ namespace { // (anonymous)
     return args;
   }
 
-  template<class BufferExecutionSpace, class BufferMemorySpace>
+  template<class PacketType,
+           class BufferExecutionSpace,
+           class BufferMemorySpace>
   void
-  runBenchmark (Teuchos::FancyOStream& out,
-                const CmdLineArgs& args,
-                const Teuchos::Comm<int>& comm)
+  runExchangeBenchmark (Teuchos::FancyOStream& out,
+                        const CmdLineArgs& args,
+                        const Teuchos::Comm<int>& comm)
   {
     using Teuchos::TimeMonitor;
     using Teuchos::TypeNameTraits;
-    using packet_type = int;
+    using packet_type = PacketType;
     using buffer_execution_space =
       typename BufferExecutionSpace::execution_space;
-    using buffer_memory_space = typename BufferMemorySpace::memory_space;
+    using buffer_memory_space =
+      typename BufferMemorySpace::memory_space;
     using buffer_device_type =
       Kokkos::Device<buffer_execution_space, buffer_memory_space>;
     using buffer_dual_view_type =
       Kokkos::DualView<packet_type*, buffer_device_type>;
 
+    const std::string packetTypeName =
+      TypeNameTraits<packet_type>::name ();      
     const std::string execSpaceName =
       TypeNameTraits<BufferExecutionSpace>::name ();
     const std::string memSpaceName =
       TypeNameTraits<BufferMemorySpace>::name ();
+    const std::string labelPrefix =
+      execSpaceName + ", " + memSpaceName + ", " + packetTypeName + ", ";
+    
     out << "Execution space: " << execSpaceName << endl
         << "Memory space: " << memSpaceName << endl;
     Teuchos::OSTab tab1 (out);
@@ -263,8 +287,13 @@ namespace { // (anonymous)
     const int myRank = comm.getRank ();
     const int numProcs = comm.getSize ();
 
-    buffer_dual_view_type recvBuf ("recvBuf", args.bufSize);
-    buffer_dual_view_type sendBuf ("sendBuf", args.bufSize);
+    const size_t bufNumEnt = args.bufSize / sizeof (packet_type);
+    buffer_dual_view_type recvBuf =
+      makeBufferDualView<packet_type, buffer_device_type>
+        ("recvBuf", bufNumEnt);
+    buffer_dual_view_type sendBuf =
+      makeBufferDualView<packet_type, buffer_device_type>
+        ("sendBuf", bufNumEnt);
 
     {
       out << "Test self-messages" << endl;
@@ -273,13 +302,13 @@ namespace { // (anonymous)
       const int recvProc = myRank;
       const int sendProc = myRank;
       const int msgTag = 11;
-      const packet_type startValue = 666;
+      const packet_type startValue = static_cast<packet_type> (666);
       const bool makeMpiUseHostBuf = false;
 
-      auto wholeLoopTimer = TimeMonitor::getNewCounter
-        (execSpaceName + ", " + memSpaceName + ", self messages: All");
-      auto exchangeTimer = TimeMonitor::getNewCounter
-        (execSpaceName + ", " + memSpaceName + ", self messages: MPI only");
+      auto wholeLoopTimer =
+        TimeMonitor::getNewCounter (labelPrefix + "Self: All");
+      auto exchangeTimer =
+        TimeMonitor::getNewCounter (labelPrefix + "Self: MPI only");
 
       TimeMonitor wholeLoopTimeMon (*wholeLoopTimer);
       for (int trial = 0; trial < args.numTrials; ++trial) {
@@ -301,14 +330,16 @@ namespace { // (anonymous)
       const int recvProc = (myRank + 1) % numProcs;
       const int sendProc = (myRank + 1) % numProcs;
       const int msgTag = 31;
-      const packet_type sendStartValue = (myRank == 0) ? 93 : 418;
-      const packet_type recvStartValue = (myRank == 0) ? 418 : 93;
+      const packet_type sendStartValue =
+        static_cast<packet_type> ((myRank == 0) ? 93 : 418);
+      const packet_type recvStartValue =
+        static_cast<packet_type> ((myRank == 0) ? 418 : 93);
       const bool makeMpiUseHostBuf = false;
 
-      auto wholeLoopTimer = TimeMonitor::getNewCounter
-        (execSpaceName + ", " + memSpaceName + ", process pairs: All");
-      auto exchangeTimer = TimeMonitor::getNewCounter
-        (execSpaceName + ", " + memSpaceName + ", process pairs: MPI only");
+      auto wholeLoopTimer =
+        TimeMonitor::getNewCounter (labelPrefix + "Pair: All");
+      auto exchangeTimer =
+        TimeMonitor::getNewCounter (labelPrefix + "Pair: MPI only");
 
       TimeMonitor wholeLoopTimeMon (*wholeLoopTimer);
       for (int trial = 0; trial < args.numTrials; ++trial) {
@@ -324,6 +355,109 @@ namespace { // (anonymous)
     }
   }
 
+  template<class PacketType>
+  void
+  runRawAllocationBenchmark (Teuchos::FancyOStream& out,
+                             const CmdLineArgs& args,
+                             const Teuchos::Comm<int>& /* comm */)
+  {
+    using Teuchos::TimeMonitor;
+    using packet_type = PacketType;
+    
+    const std::string packetTypeName =
+      Teuchos::TypeNameTraits<packet_type>::name ();
+    const size_t packetSize = sizeof (packet_type);
+    const size_t bufNumEnt = args.bufSize / packetSize;
+
+    {
+      out << "Allocation using new and delete" << endl;
+      Teuchos::OSTab tab1 (out);    
+      
+      auto timer = TimeMonitor::getNewCounter
+        (packetTypeName + ", Alloc: new/delete");
+      TimeMonitor timeMon (*timer);
+      for (int trial = 0; trial < args.numTrials; ++trial) {
+        packet_type* h_ptr = new packet_type [bufNumEnt];
+        delete [] h_ptr;
+      }
+    }
+
+    {
+      out << "Allocation using malloc and free" << endl;
+      Teuchos::OSTab tab1 (out);    
+      
+      auto timer = TimeMonitor::getNewCounter
+        (packetTypeName + ", Alloc: malloc/free");
+      TimeMonitor timeMon (*timer);
+      for (int trial = 0; trial < args.numTrials; ++trial) {
+        packet_type* h_ptr =
+          reinterpret_cast<packet_type*> (std::malloc (args.bufSize));
+        std::free (h_ptr);
+      }
+    }
+  }
+
+  template<class PacketType,
+           class BufferExecutionSpace,
+           class BufferMemorySpace>
+  void
+  runAllocationBenchmark (Teuchos::FancyOStream& out,
+                          const CmdLineArgs& args,
+                          const Teuchos::Comm<int>& /* comm */)
+  {
+    using Tpetra::Details::view_alloc_no_init;    
+    using Teuchos::TimeMonitor;
+    using Teuchos::TypeNameTraits;
+    using packet_type = PacketType;
+    using buffer_execution_space =
+      typename BufferExecutionSpace::execution_space;
+    using buffer_memory_space =
+      typename BufferMemorySpace::memory_space;
+    using buffer_device_type =
+      Kokkos::Device<buffer_execution_space, buffer_memory_space>;
+    using buffer_dual_view_type =
+      Kokkos::DualView<packet_type*, buffer_device_type>;
+    using buffer_dev_view_type = typename buffer_dual_view_type::t_dev;
+    using buffer_host_view_type = typename buffer_dual_view_type::t_host;
+    
+    const std::string packetTypeName =
+      TypeNameTraits<packet_type>::name ();
+    const std::string execSpaceName =
+      TypeNameTraits<buffer_execution_space>::name ();
+    const std::string memSpaceName =
+      TypeNameTraits<buffer_memory_space>::name ();
+    const std::string labelPrefix =
+      execSpaceName + ", " + memSpaceName + ", " + packetTypeName + ", ";
+    const size_t packetSize = sizeof (packet_type);
+    const size_t bufNumEnt = args.bufSize / packetSize;
+    const char bufLabel[] = "Comm buffer";
+    
+    out << "Execution space: " << execSpaceName << endl
+        << "Memory space: " << memSpaceName << endl;
+    Teuchos::OSTab tab1 (out);
+
+    if (! std::is_same<typename buffer_dev_view_type::device_type,
+          typename buffer_host_view_type::device_type>::value) {
+      auto timer =
+        TimeMonitor::getNewCounter (labelPrefix + "Alloc: Device");
+      TimeMonitor timeMon (*timer);
+      for (int trial = 0; trial < args.numTrials; ++trial) {
+        buffer_dev_view_type d_view
+          (view_alloc_no_init (bufLabel), bufNumEnt);
+      }
+    }
+    
+    {
+      auto timer = TimeMonitor::getNewCounter
+        (labelPrefix + "Alloc: Host");
+      TimeMonitor timeMon (*timer);
+      for (int trial = 0; trial < args.numTrials; ++trial) {
+        buffer_host_view_type h_view
+          (view_alloc_no_init (bufLabel), bufNumEnt);
+      }
+    }
+  }
+  
   Teuchos::RCP<Teuchos::FancyOStream>
   getOutputStream (const Teuchos::Comm<int>& comm)
   {
@@ -337,18 +471,18 @@ namespace { // (anonymous)
     return Teuchos::getFancyOStream (outPtr);
   }
 
+  template<class PacketType>
   void
-  runBenchmarks (Teuchos::FancyOStream& out,
-                 const CmdLineArgs& args,
-                 const Teuchos::Comm<int>& comm)
+  runExchangeBenchmarks (Teuchos::FancyOStream& out,
+                         const CmdLineArgs& args,
+                         const Teuchos::Comm<int>& comm)
   {
-    const int myRank = comm.getRank ();
-    const int numProcs = comm.getSize ();
+    using packet_type = PacketType;
 
-    out << "MPI communication buffer benchmarks" << endl;
+    out << "Point-to-point message exchange" << endl;
     Teuchos::OSTab tab1 (out);
 
-    out << "Number of MPI processes: " << numProcs << endl;
+#ifdef KOKKOS_ENABLE_CUDA    
     const bool assumeMpiIsCudaAware =
       Tpetra::Details::Behavior::assumeMpiIsCudaAware ();
     out << "May we assume that MPI is CUDA aware? "
@@ -358,23 +492,93 @@ namespace { // (anonymous)
     {
       using buf_exec_space = Kokkos::Cuda;
       using buf_mem_space = Kokkos::CudaHostPinnedSpace;
-      runBenchmark<buf_exec_space, buf_mem_space> (out, args, comm);
+      runExchangeBenchmark<packet_type, buf_exec_space,
+        buf_mem_space> (out, args, comm);
     }
     if (assumeMpiIsCudaAware) {
       using buf_exec_space = Kokkos::Cuda;
       using buf_mem_space = Kokkos::CudaSpace;
-      runBenchmark<buf_exec_space, buf_mem_space> (out, args, comm);
+      runExchangeBenchmark<packet_type, buf_exec_space,
+        buf_mem_space> (out, args, comm);
     }
     if (assumeMpiIsCudaAware) {
       using buf_exec_space = Kokkos::Cuda;
       using buf_mem_space = Kokkos::CudaUVMSpace;
-      runBenchmark<buf_exec_space, buf_mem_space> (out, args, comm);
+      runExchangeBenchmark<packet_type,
+        buf_exec_space, buf_mem_space> (out, args, comm);
     }
+#endif // KOKKOS_ENABLE_CUDA
     {
       using buf_exec_space = Kokkos::DefaultHostExecutionSpace;
       using buf_mem_space = Kokkos::HostSpace;
-      runBenchmark<buf_exec_space, buf_mem_space> (out, args, comm);
+      runExchangeBenchmark<packet_type,
+        buf_exec_space, buf_mem_space> (out, args, comm);
     }
+  }
+
+  template<class PacketType>
+  void
+  runAllocationBenchmarks (Teuchos::FancyOStream& out,
+                           const CmdLineArgs& args,
+                           const Teuchos::Comm<int>& comm)
+  {
+    using packet_type = PacketType;
+
+    out << "Communication buffer allocation" << endl;
+    Teuchos::OSTab tab1 (out);
+
+#ifdef KOKKOS_ENABLE_CUDA    
+    {
+      using buf_exec_space = Kokkos::Cuda;
+      using buf_mem_space = Kokkos::CudaHostPinnedSpace;
+      runAllocationBenchmark<packet_type, buf_exec_space,
+        buf_mem_space> (out, args, comm);
+    }
+    {
+      using buf_exec_space = Kokkos::Cuda;
+      using buf_mem_space = Kokkos::CudaSpace;
+      runAllocationBenchmark<packet_type, buf_exec_space,
+        buf_mem_space> (out, args, comm);
+    }
+    {
+      using buf_exec_space = Kokkos::Cuda;
+      using buf_mem_space = Kokkos::CudaUVMSpace;
+      runAllocationBenchmark<packet_type,
+        buf_exec_space, buf_mem_space> (out, args, comm);
+    }
+#endif // KOKKOS_ENABLE_CUDA
+    {
+      using buf_exec_space = Kokkos::DefaultHostExecutionSpace;
+      using buf_mem_space = Kokkos::HostSpace;
+      runAllocationBenchmark<packet_type,
+        buf_exec_space, buf_mem_space> (out, args, comm);
+    }
+    runRawAllocationBenchmark<packet_type> (out, args, comm);
+  }
+  
+  template<class PacketType>
+  void
+  runBenchmarks (Teuchos::FancyOStream& out,
+                 const CmdLineArgs& args,
+                 const Teuchos::Comm<int>& comm)
+  {
+    using packet_type = PacketType;
+
+    const std::string packetTypeName =
+      Teuchos::TypeNameTraits<packet_type>::name ();
+    const size_t packetSize = sizeof (packet_type);
+    const size_t bufNumEnt = args.bufSize / packetSize;
+
+    out << "Communication buffer benchmarks" << endl;
+    Teuchos::OSTab tab1 (out);
+    out << "Number of trials: " << args.numTrials << endl
+        << "Number of MPI processes: " << comm.getSize () << endl
+        << "Packet type: " << packetTypeName << endl
+        << "Packet size: " << packetSize << endl
+        << "Buffer size: " << bufNumEnt << endl;
+    
+    runExchangeBenchmarks<packet_type> (out, args, comm);
+    runAllocationBenchmarks<packet_type> (out, args, comm);
   }
 
 } // namespace (anonymous)
@@ -399,7 +603,21 @@ main (int argc, char* argv[])
     auto fancyOutPtr = getOutputStream (*comm);
     auto& out = *fancyOutPtr;
 
-    runBenchmarks (out, parsedArgs, *comm);
+    if (parsedArgs.packetType == "double") {
+      using packet_type = double;
+      runBenchmarks<packet_type> (out, parsedArgs, *comm);
+    }
+    else if (parsedArgs.packetType == "int") {
+      using packet_type = int;
+      runBenchmarks<packet_type> (out, parsedArgs, *comm);
+    }
+    else {
+      if (comm->getRank () == 0) {
+        std::cerr << "Unsupported packet-type \""
+                  << parsedArgs.packetType << "\"" << std::endl;
+      }
+      errCode = -1;
+    }
     Teuchos::TimeMonitor::report (comm.ptr (), out);
   }
   return errCode;
