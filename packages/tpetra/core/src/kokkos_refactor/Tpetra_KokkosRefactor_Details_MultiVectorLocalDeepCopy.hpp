@@ -100,7 +100,9 @@ localDeepCopy (const DstViewType& dst,
   using size_type = typename DstViewType::size_type;
 
   if (dstConstStride && srcConstStride) {
-    ::Tpetra::Details::copyConvert (dst, src);
+    if (dst.data () != src.data ()) {
+      ::Tpetra::Details::copyConvert (dst, src);
+    }
   }
   else {
     const size_type numCols = dstConstStride ?
@@ -114,7 +116,9 @@ localDeepCopy (const DstViewType& dst,
         static_cast<size_type> (srcWhichVecs[j]);
       const auto src_j = subview (src, ALL (), src_col);
 
-      ::Tpetra::Details::copyConvert (dst_j, src_j);
+      if (dst_j.data () != src_j.data ()) {
+        ::Tpetra::Details::copyConvert (dst_j, src_j);
+      }
     }
   }
 }
@@ -128,7 +132,9 @@ void
 localDeepCopyConstStride (const DstViewType& dst,
                           const SrcViewType& src)
 {
-  return ::Tpetra::Details::copyConvert (dst, src);
+  if (dst.data () != src.data ()) {
+    return ::Tpetra::Details::copyConvert (dst, src);
+  }
 }
 
 } // Details namespace
