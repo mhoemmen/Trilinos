@@ -117,6 +117,7 @@ TpetraVectorSpace<Scalar,LocalOrdinal,GlobalOrdinal,Node>::createMembers(int num
 namespace { // (anonymous)
 
 // FIXME (mfh 03 Jul 2019) It's not clear to me why this depends on Tpetra.
+// Also, there might already be some generic way to do this in Thyra.
 template<class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 class CopyMultiVectorViewBack {
 private:
@@ -150,34 +151,36 @@ TpetraVectorSpace<Scalar,LocalOrdinal,GlobalOrdinal,Node>::createMembersView(
 #ifdef TEUCHOS_DEBUG
   TEUCHOS_TEST_FOR_EXCEPT( raw_mv.subDim() != this->dim() );
 #endif
+  using LO = LocalOrdinal;
+  using GO = GlobalOrdinal;
+  using MV = Tpetra::MultiVector<Scalar, LO, GO, Node>;
 
-  // Create a multi-vector
-  RCP< MultiVectorBase<Scalar> > mv;
-  if (!tpetraMap_->isDistributed()) {
+  RCP<MultiVectorBase<Scalar>> mv;
+  RCP<MV> tpetraMV;
 
-    if (tpetraMV_.is_null() || (tpetraMV_->getNumVectors() != size_t (raw_mv.numSubCols()))) {
-      if (!tpetraMV_.is_null())
-        // The MV is already allocated. If we are still using it, then very bad things can happen.
-      TEUCHOS_TEST_FOR_EXCEPTION(Teuchos::get_extra_data<bool>(tpetraMV_,"inUse"),
-                                 std::runtime_error,
-                                 "Cannot use the cached vector simultaneously more than once.");
-      using IST = typename Tpetra::MultiVector<Scalar,LocalOrdinal,GlobalOrdinal,Node>::impl_scalar_type;
-      using DT = typename Tpetra::MultiVector<Scalar,LocalOrdinal,GlobalOrdinal,Node>::device_type;
-      auto dv = ::Tpetra::Details::getStatic2dDualView<IST, DT> (tpetraMap_->getGlobalNumElements(), raw_mv.numSubCols());
-      tpetraMV_ = Teuchos::rcp(new Tpetra::MultiVector<Scalar,LocalOrdinal,GlobalOrdinal,Node>(tpetraMap_, dv));
-      bool inUse = false;
-      Teuchos::set_extra_data(inUse,"inUse",Teuchos::outArg(tpetraMV_));
+  if (! tpetraMap_->isDistributed ()) {
+    using Tpetra::Details::getStatic2dDualView;
+    using IST = typename MV::impl_scalar_type;
+    using DT = typename MV::device_type;
+
+    // TODO Check whether the cached static storage is currently in
+    // use by another non-distributed Tpetra::MultiVector.
+    auto dv = getStatic2dDualView<IST, DT> (tpetraMap_->getGlobalNumElements(), raw_mv.numSubCols());
+    tpetraMV = Teuchos::rcp (new MV (tpetraMap_, dv));
+
+    if (tpetraDomainSpace_.is_null() || raw_mv.numSubCols() != tpetraDomainSpace_->localSubDim()) {
+      using Tpetra::createLocalMapWithNode;
+      auto lclMap = createLocalMapWithNode<LO, GO, Node>(raw_mv.numSubCols(), tpetraMap_->getComm());
+      tpetraDomainSpace_ = tpetraVectorSpace<Scalar>(lclMap);
     }
+    mv = tpetraMultiVector<Scalar>(weakSelfPtr_.create_strong().getConst(), tpetraDomainSpace_, tpetraMV);
+  }
+  else {
+    using Teuchos::rcp_dynamic_cast;
+    using TMV = TpetraMultiVector<Scalar, LO, GO, Node>;
 
-    if (tpetraDomainSpace_.is_null() || raw_mv.numSubCols() != tpetraDomainSpace_->localSubDim())
-      tpetraDomainSpace_ = tpetraVectorSpace<Scalar>(Tpetra::createLocalMapWithNode<LocalOrdinal, GlobalOrdinal, Node>(raw_mv.numSubCols(), tpetraMap_->getComm()));
-
-    mv = tpetraMultiVector<Scalar>(weakSelfPtr_.create_strong().getConst(), tpetraDomainSpace_, tpetraMV_);
-  } else {
     mv = this->createMembers(raw_mv.numSubCols());
-    bool inUse = false;
-    RCP<Tpetra::MultiVector<Scalar,LocalOrdinal,GlobalOrdinal,Node> > tmv = Teuchos::rcp_dynamic_cast<TpetraMultiVector<Scalar,LocalOrdinal,GlobalOrdinal,Node> >(mv,true)->getTpetraMultiVector();
-    Teuchos::set_extra_data(inUse,"inUse",Teuchos::outArg(tmv));
+    tpetraMV = rcp_dynamic_cast<TMV>(mv, true)->getTpetraMultiVector();
   }
   // Copy initial values in raw_mv into multi-vector
   RTOpPack::SubMultiVectorView<Scalar> smv;
@@ -187,10 +190,9 @@ TpetraVectorSpace<Scalar,LocalOrdinal,GlobalOrdinal,Node>::createMembersView(
     raw_mv
     );
   mv->commitDetachedView(&smv);
-  // Setup smart pointer to multi-vector to copy view back out just before multi-vector is destroyed
+  // Just before MultiVector is destroyed, copy "view"'s data back.
   Teuchos::set_extra_data(
-    // We create a duplicate of the RCP, otherwise the ref count does not go to zero.
-    Teuchos::rcp(new CopyMultiVectorViewBack<Scalar,LocalOrdinal,GlobalOrdinal,Node>(*mv, raw_mv)),
+    Teuchos::rcp(new CopyMultiVectorViewBack<Scalar, LO, GO, Node>(*mv, raw_mv)),
     "CopyMultiVectorViewBack",
     Teuchos::outArg(mv),
     Teuchos::PRE_DESTROY
@@ -207,32 +209,39 @@ TpetraVectorSpace<Scalar,LocalOrdinal,GlobalOrdinal,Node>::createMembersView(
 #ifdef TEUCHOS_DEBUG
   TEUCHOS_TEST_FOR_EXCEPT( raw_mv.subDim() != this->dim() );
 #endif
+  using LO = LocalOrdinal;
+  using GO = GlobalOrdinal;
+  using MV = Tpetra::MultiVector<Scalar, LO, GO, Node>;
+
   // Create a multi-vector
   RCP< MultiVectorBase<Scalar> > mv;
-  if (!tpetraMap_->isDistributed()) {
-    if (tpetraMV_.is_null() || (tpetraMV_->getNumVectors() != size_t (raw_mv.numSubCols()))) {
-      if (!tpetraMV_.is_null())
-        // The MV is already allocated. If we are still using it, then very bad things can happen.
-        TEUCHOS_TEST_FOR_EXCEPTION(Teuchos::get_extra_data<bool>(tpetraMV_,"inUse"),
-                                   std::runtime_error,
-                                   "Cannot use the cached vector simultaneously more than once.");
-      using IST = typename Tpetra::MultiVector<Scalar,LocalOrdinal,GlobalOrdinal,Node>::impl_scalar_type;
-      using DT = typename Tpetra::MultiVector<Scalar,LocalOrdinal,GlobalOrdinal,Node>::device_type;
-      auto dv = ::Tpetra::Details::getStatic2dDualView<IST, DT> (tpetraMap_->getGlobalNumElements(), raw_mv.numSubCols());
-      tpetraMV_ = Teuchos::rcp(new Tpetra::MultiVector<Scalar,LocalOrdinal,GlobalOrdinal,Node>(tpetraMap_, dv));
-      bool inUse = false;
-      Teuchos::set_extra_data(inUse,"inUse",Teuchos::outArg(tpetraMV_));
+  RCP<MV> tpetraMV;
+
+  if (! tpetraMap_->isDistributed()) {
+    using Tpetra::Details::getStatic2dDualView;
+    using IST = typename MV::impl_scalar_type;
+    using DT = typename MV::device_type;
+
+    auto dv = getStatic2dDualView<IST, DT> (tpetraMap_->getGlobalNumElements(),
+                                            raw_mv.numSubCols());
+    tpetraMV = Teuchos::rcp (new MV (tpetraMap_, dv));
+
+    if (tpetraDomainSpace_.is_null() ||
+        raw_mv.numSubCols() != tpetraDomainSpace_->localSubDim()) {
+      using Tpetra::createLocalMapWithNode;
+      auto lclMap = createLocalMapWithNode<LO, GO, Node>(raw_mv.numSubCols(),
+                                                         tpetraMap_->getComm());
+      tpetraDomainSpace_ = tpetraVectorSpace<Scalar>(lclMap);
     }
+    mv = tpetraMultiVector<Scalar>(weakSelfPtr_.create_strong().getConst(),
+                                   tpetraDomainSpace_, tpetraMV);
+  }
+  else {
+    using Teuchos::rcp_dynamic_cast;
+    using TMV = TpetraMultiVector<Scalar, LO, GO, Node>;
 
-    if (tpetraDomainSpace_.is_null() || raw_mv.numSubCols() != tpetraDomainSpace_->localSubDim())
-      tpetraDomainSpace_ = tpetraVectorSpace<Scalar>(Tpetra::createLocalMapWithNode<LocalOrdinal, GlobalOrdinal, Node>(raw_mv.numSubCols(), tpetraMap_->getComm()));
-
-    mv = tpetraMultiVector<Scalar>(weakSelfPtr_.create_strong().getConst(), tpetraDomainSpace_, tpetraMV_);
-  } else {
     mv = this->createMembers(raw_mv.numSubCols());
-    bool inUse = false;
-    RCP<Tpetra::MultiVector<Scalar,LocalOrdinal,GlobalOrdinal,Node> > tmv = Teuchos::rcp_dynamic_cast<TpetraMultiVector<Scalar,LocalOrdinal,GlobalOrdinal,Node> >(mv,true)->getTpetraMultiVector();
-    Teuchos::set_extra_data(inUse,"inUse",Teuchos::outArg(tmv));
+    tpetraMV = rcp_dynamic_cast<TMV> (mv, true)->getTpetraMultiVector();
   }
   // Copy values in raw_mv into multi-vector
   RTOpPack::SubMultiVectorView<Scalar> smv;

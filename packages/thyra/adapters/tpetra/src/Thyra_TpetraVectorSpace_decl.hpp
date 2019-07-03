@@ -133,7 +133,6 @@ private:
 
   RCP<const Tpetra::Map<LocalOrdinal,GlobalOrdinal,Node> > tpetraMap_;
   mutable RCP<TpetraVectorSpace<Scalar,LocalOrdinal,GlobalOrdinal,Node> > tpetraDomainSpace_;
-  mutable RCP<Tpetra::MultiVector<Scalar,LocalOrdinal,GlobalOrdinal,Node> > tpetraMV_;
   // The only reason Thyra needs this comm_ object is because Thyra
   // uses Ordinal as the Comm template parameter, while Tpetra uses
   // int.  Ordinal is some 64-bit type, which doesn't make any sense,
