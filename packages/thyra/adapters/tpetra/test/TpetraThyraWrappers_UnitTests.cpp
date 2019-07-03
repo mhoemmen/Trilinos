@@ -94,14 +94,31 @@ createTpetraMap(const int localDim)
   // ToDo: Pass in the comm?
 }
 
-// ToDo: Above: Vary the LocalOrdinal and GlobalOrdinal types?
-
 
 template<class Scalar>
 RCP<const VectorSpaceBase<Scalar> >
 createTpetraVectorSpace(const int localDim)
 {
   return Thyra::createVectorSpace<Scalar>(createTpetraMap(g_localDim));
+}
+
+
+template<class Scalar>
+RCP<const VectorSpaceBase<Scalar> >
+createReplicatedTpetraVectorSpace (const TpetraMap_t::local_ordinal_type lclNumRows)
+{
+  using GST = Tpetra::global_size_t;
+  using GO = TpetraMap_t::global_ordinal_type;
+  using Teuchos::RCP;
+  using Teuchos::rcp;
+
+  auto comm = Teuchos::DefaultComm<int>::getComm ();
+  const GO gblNumRows = GO (comm->getSize ()) * GO (lclNumRows);
+  const GO indexBase = 0;
+  RCP<const TpetraMap_t> tpetraMap
+    (new TpetraMap_t (GST (gblNumRows), indexBase, comm,
+                      Tpetra::LocallyReplicated));
+  return Thyra::createVectorSpace<Scalar> (tpetraMap);
 }
 
 
@@ -275,6 +292,26 @@ TEUCHOS_UNIT_TEST_TEMPLATE_1_DECL( TpetraThyraWrappers, createVector,
 
 }
 
+//
+// Create replicated multivectors.  Make sure that caching works.
+//
+
+TEUCHOS_UNIT_TEST_TEMPLATE_1_DECL( TpetraThyraWrappers,
+  createReplicatedMultiVectors,
+  Scalar )
+{
+  const int lclNumRows = 10;
+  const int lclNumCols = 3;
+
+  auto rangeSpace = createReplicatedTpetraVectorSpace<Scalar> (lclNumRows);
+  RCP<Thyra::MultiVectorBase<Scalar> > X =
+    Thyra::createMembers (rangeSpace, lclNumCols);
+  TEST_EQUALITY( X->range (), rangeSpace );
+
+  RCP<Thyra::MultiVectorBase<Scalar> > Y =
+    Thyra::createMembers (rangeSpace, lclNumCols);
+  TEST_EQUALITY( Y->range (), rangeSpace );
+}
 
 //
 // createConstVector
@@ -1038,6 +1075,9 @@ TEUCHOS_UNIT_TEST_TEMPLATE_1_DECL( TpetraThyraWrappers, TpetraLinearOp_ScaledLin
    \
   TEUCHOS_UNIT_TEST_TEMPLATE_1_INSTANT( TpetraThyraWrappers, \
     createConstVector, SCALAR ) \
+   \
+  TEUCHOS_UNIT_TEST_TEMPLATE_1_INSTANT( TpetraThyraWrappers, \
+    createReplicatedMultiVectors, SCALAR ) \
    \
   TEUCHOS_UNIT_TEST_TEMPLATE_1_INSTANT( TpetraThyraWrappers,  \
     createMultiVector, SCALAR ) \
