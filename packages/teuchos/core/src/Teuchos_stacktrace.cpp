@@ -421,9 +421,27 @@ std::string stacktrace2str(const StacktraceAddresses &stacktrace_addresses)
       // then contains the full path to the .so library.
       full_stacktrace_str += addr2str(match.filename, match.addr_in_file);
     } else {
+#if 0
       // The 'addr_in_file' is from the current executable binary, that
       // one can find at '/proc/self/exe'. So we'll use that.
       full_stacktrace_str += addr2str("/proc/self/exe", match.addr_in_file);
+#else
+      constexpr int stackBufCap = 50;
+      void* stackBuf[stackBufCap];
+      const int stackBufLen = backtrace (stackBuf, stackBufCap);
+      char** symbols = backtrace_symbols (stackBuf, stackBufLen);
+
+      if (symbols != nullptr) {
+        for (int i = 0; i < stackBufLen; ++i) {
+          if (symbols[i] != nullptr) {
+            full_stacktrace_str += std::string (symbols[i]);
+            full_stacktrace_str += '\n';
+          }
+        }
+        free (symbols);
+        symbols = nullptr;
+      }
+#endif
     }
   }
 
@@ -516,4 +534,3 @@ void Teuchos::print_stack_on_segfault()
 
 
 #endif // HAVE_TEUCHOS_STACKTRACE
-
