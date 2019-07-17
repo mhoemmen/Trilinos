@@ -102,6 +102,9 @@
 /* Define if building with MPI (the Message-Passing Interface) */
 #cmakedefine HAVE_IFPACK2_MPI
 
+/* Define if building with Intel's Math Kernel Library (MKL) */
+#cmakedefine HAVE_IFPACK2_MKL
+
 /* Define if we have the QD extended-precision TPL */
 #cmakedefine HAVE_IFPACK2_QD
 

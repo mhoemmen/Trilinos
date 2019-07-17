@@ -77,6 +77,13 @@ TRIBITS_ADD_OPTION_AND_DEFINE(
   "Enable MPI build of Ifpack2."
   ${TPL_ENABLE_MPI} )
 
+#Adding an option and define when MPI is enabled.
+TRIBITS_ADD_OPTION_AND_DEFINE(
+  ${PACKAGE_NAME}_ENABLE_MKL
+  HAVE_IFPACK2_MKL
+  "Let Ifpack2 use Intel's Math Lernel Library (MKL)."
+  ${TPL_ENABLE_MKL} )
+
 ASSERT_DEFINED(${PACKAGE_NAME}_ENABLE_Lemon)
 ASSERT_DEFINED(${PACKAGE_NAME}_ENABLE_Amesos2)
 ASSERT_DEFINED(${PACKAGE_NAME}_ENABLE_Cholmod)
