@@ -52,6 +52,9 @@
 #include "Tpetra_CrsMatrix.hpp"
 #include "Tpetra_MultiVector.hpp"
 #include "Tpetra_RowMatrixTransposer.hpp"
+#ifdef HAVE_IFPACK2_MKL
+#  include "Ifpack2_Details_MklCrsMatrixTriangularSolver.hpp"
+#endif // HAVE_IFPACK2_MKL
 
 namespace { // (anonymous)
 
@@ -191,6 +194,79 @@ referenceApply (MultiVectorType& Y,
     }
   }
 }
+
+#ifdef HAVE_IFPACK2_MKL
+template<class CrsMatrixType, class MultiVectorType>
+void
+mklApply (MultiVectorType& Y,
+          const CrsMatrixType& A,
+          MultiVectorType& X, // input; nonconst so we can sync it to host
+          const bool isUpperTriangular, // opposite is "lower triangular"
+          const bool implicitUnitDiag, // opposite is "explicitly stored, possibly non-unit diagonal"
+          const Teuchos::ETransp mode,
+          const typename MultiVectorType::scalar_type& alpha,
+          const typename MultiVectorType::scalar_type& beta)
+{
+  using IST = typename MultiVectorType::impl_scalar_type;
+  using KAT = Kokkos::ArithTraits<IST>;
+  using MV = MultiVectorType;
+  using local_matrix_type = typename CrsMatrixType::local_matrix_type;
+  using solver_type =
+    Ifpack2::Details::MKL::MklCrsMatrixTriangularSolver<local_matrix_type>;
+
+  const Teuchos::EUplo uplo = isUpperTriangular ?
+    Teuchos::UPPER_TRI : Teuchos::LOWER_TRI;
+  const Teuchos::EDiag diag = implicitUnitDiag ?
+    Teuchos::UNIT_DIAG : Teuchos::NON_UNIT_DIAG;
+  // NOTE (mfh 17 Jul 2019) At some point, we may want to test
+  // different numbers here, to catch any potential MKL bugs.  For
+  // now, pick something large enough to trigger full optimization.
+  const int numExpectedCalls = 1000;
+
+  std::cerr << "MKL: solver constructor" << std::endl;
+
+  solver_type solver (A.getLocalMatrix (), mode, uplo, diag,
+                      numExpectedCalls);
+
+  // std::cerr << "MKL: setMatrix" << std::endl;
+  // solver.setMatrix (A.getLocalMatrix ()); // Just check syntax for now
+
+  std::cerr << "MKL: initialize" << std::endl;
+  solver.initialize ();
+
+  std::cerr << "MKL: compute" << std::endl;
+  solver.compute ();
+
+  X.sync_host ();
+  Y.sync_host ();
+  Y.modify_host ();
+  auto X_lcl = X.getLocalViewHost ();
+  auto Y_lcl = Y.getLocalViewHost ();
+
+  if (IST (beta) == KAT::zero ()) {
+    // Follow BLAS rules: overwrite initial contents of Y with zeros.
+    Kokkos::deep_copy (Y_lcl, KAT::zero ());
+    std::cerr << "MKL: apply" << std::endl;
+    solver.apply (X_lcl, Y_lcl, mode, IST (alpha));
+  }
+  else { // beta != 0
+    if (IST (alpha) == KAT::zero ()) {
+      Y.scale (beta); // Y := beta * Y
+    }
+    else { // alpha != 0
+      MV Y_tmp (Y, Teuchos::Copy);
+      Y_tmp.sync_host ();
+      auto Y_tmp_lcl = Y_tmp.getLocalViewHost ();
+      std::cerr << "MKL: apply" << std::endl;
+      solver.apply (X_lcl, Y_tmp_lcl, mode, IST (alpha));
+
+      Y_tmp.sync_device ();
+      Y.sync_device ();
+      Y.update (KAT::one (), Y_tmp, beta); // Y := beta * Y + Y_tmp
+    }
+  }
+}
+#endif // HAVE_IFPACK2_MKL
 
 struct TrisolverDetails {
   enum Enum { Internal, HTS };
@@ -494,6 +570,10 @@ void testCompareToLocalSolve (bool& success, Teuchos::FancyOStream& out,
           mv_type Y (rangeMap, numVecs);
           mv_type X_copy (X.getMap (), numVecs);
           mv_type Y_copy (Y.getMap (), numVecs);
+#ifdef HAVE_IFPACK2_MKL
+          mv_type X_mkl (X.getMap (), numVecs);
+          mv_type Y_mkl (Y.getMap (), numVecs);
+#endif // HAVE_IFPACK2_MKL
 
           for (Scalar alpha : alphaValues) {
             out << "alpha: " << alpha << endl;
@@ -507,6 +587,10 @@ void testCompareToLocalSolve (bool& success, Teuchos::FancyOStream& out,
               Y.randomize ();
               Tpetra::deep_copy (X_copy, X);
               Tpetra::deep_copy (Y_copy, Y);
+#ifdef HAVE_IFPACK2_MKL
+              Tpetra::deep_copy (X_mkl, X);
+              Tpetra::deep_copy (Y_mkl, Y);
+#endif // HAVE_IFPACK2_MKL
 
               TEST_NOTHROW( solver->apply (X, Y, mode, alpha, beta) );
               // Don't continue unless no processes threw.  Otherwise, the
@@ -525,14 +609,39 @@ void testCompareToLocalSolve (bool& success, Teuchos::FancyOStream& out,
               // Compare Y and Y_copy.  Compute difference in Y_copy.
               Y_copy.update (ONE, Y, -ONE); // Y_copy := Y - Y_copy
               Y_copy.normInf (norms);
-
-              const mag_type tol = static_cast<mag_type> (gblNumRows) * STS::eps ();
-              for (std::size_t j = 0; j < numVecs; ++j) {
-                TEST_ASSERT( norms(j) <= tol );
-                if (norms(j) > tol) {
-                  out << "norms(" << j << ") = " << norms(j) << " > tol = " << tol << endl;
+              {
+                const mag_type tol = static_cast<mag_type> (gblNumRows) * STS::eps ();
+                for (std::size_t j = 0; j < numVecs; ++j) {
+                  TEST_ASSERT( norms(j) <= tol );
+                  if (norms(j) > tol) {
+                    out << "norms(" << j << ") = " << norms(j) << " > tol = " << tol << endl;
+                  }
                 }
               }
+
+#ifdef HAVE_IFPACK2_MKL
+              {
+                // Test against MKL.
+                TEST_NOTHROW( mklApply (Y_mkl, *A_copy, X_mkl,
+                                        isUpperTriangular,
+                                        implicitUnitDiag,
+                                        mode, alpha, beta) );
+                if (! isGblSuccess (success, out)) return;
+
+                // Compare Y and Y_mkl.  Compute difference in Y_mkl.
+                Y_mkl.update (ONE, Y, -ONE); // Y_mkl := Y - Y_mkl
+                Y_mkl.normInf (norms);
+                {
+                  const mag_type tol = static_cast<mag_type> (gblNumRows) * STS::eps ();
+                  for (std::size_t j = 0; j < numVecs; ++j) {
+                    TEST_ASSERT( norms(j) <= tol );
+                    if (norms(j) > tol) {
+                      out << "norms(" << j << ") = " << norms(j) << " > tol = " << tol << endl;
+                    }
+                  }
+                }
+              }
+#endif // HAVE_IFPACK2_MKL
             }
           }
         }
