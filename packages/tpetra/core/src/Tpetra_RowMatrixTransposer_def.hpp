@@ -44,8 +44,7 @@
 
 #include "Tpetra_CrsMatrix.hpp"
 #include "Tpetra_Export.hpp"
-#include "Tpetra_Details_computeOffsets.hpp"
-#include "Tpetra_Details_shortSort.hpp"
+#include "Tpetra_Details_localExplicitTranspose.hpp"
 #include "Teuchos_ParameterList.hpp"
 #include "Teuchos_TimeMonitor.hpp"
 
@@ -117,15 +116,11 @@ Teuchos::RCP<CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node> >
 RowMatrixTransposer<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 createTransposeLocal (const Teuchos::RCP<Teuchos::ParameterList>& params)
 {
-  using Teuchos::Array;
-  using Teuchos::ArrayRCP;
-  using Teuchos::ArrayView;
   using Teuchos::RCP;
   using Teuchos::rcp;
   using Teuchos::rcp_dynamic_cast;
   using LO = LocalOrdinal;
   using GO = GlobalOrdinal;
-  using IST = typename CrsMatrix<Scalar, LO, GO, Node>::impl_scalar_type;
   using import_type = Tpetra::Import<LO, GO, Node>;
   using export_type = Tpetra::Export<LO, GO, Node>;
 
@@ -178,89 +173,11 @@ createTransposeLocal (const Teuchos::RCP<Teuchos::ParameterList>& params)
   }
 
   using local_matrix_type = typename crs_matrix_type::local_matrix_type;
-  using local_graph_type = typename crs_matrix_type::local_graph_type;
-  using offset_type = typename local_graph_type::size_type;
-  using row_map_type = typename local_matrix_type::row_map_type::non_const_type;
-  using index_type = typename local_matrix_type::index_type::non_const_type;
-  using values_type = typename local_matrix_type::values_type::non_const_type;
-  using execution_space = typename local_matrix_type::execution_space;
-
   local_matrix_type lclMatrix = crsMatrix->getLocalMatrix ();
-  local_graph_type lclGraph = lclMatrix.graph;
 
-  // Determine how many nonzeros there are per row in the transpose.
-  using DT = typename crs_matrix_type::device_type;
-  Kokkos::View<LO*, DT> t_counts ("transpose row counts", lclNumCols);
-  using range_type = Kokkos::RangePolicy<LO, execution_space>;
-  Kokkos::parallel_for
-    ("Compute row counts of local transpose",
-     range_type (0, lclNumRows),
-     KOKKOS_LAMBDA (const LO row) {
-      auto rowView = lclGraph.rowConst(row);
-      const LO length  = rowView.length;
-
-      for (LO colID = 0; colID < length; ++colID) {
-        const LO col = rowView(colID);
-        Kokkos::atomic_fetch_add (&t_counts[col], LO (1));
-      }
-    });
-
-  using Kokkos::view_alloc;
-  using Kokkos::WithoutInitializing;
-  row_map_type t_offsets
-    (view_alloc ("transpose ptr", WithoutInitializing), lclNumCols + 1);
-
-  // TODO (mfh 10 Jul 2019): This returns the sum of all counts,
-  // which could be useful for checking nnz.
-  (void) Details::computeOffsetsFromCounts (t_offsets, t_counts);
-
-  index_type t_cols
-    (view_alloc ("transpose lcl ind", WithoutInitializing), nnz);
-  values_type t_vals
-    (view_alloc ("transpose val", WithoutInitializing), nnz);
-  Kokkos::parallel_for
-    ("Compute local transpose",
-     range_type (0, lclNumRows),
-     KOKKOS_LAMBDA (const LO row) {
-      auto rowView = lclMatrix.rowConst(row);
-      const LO length  = rowView.length;
-
-      for (LO colID = 0; colID < length; colID++) {
-        const LO col = rowView.colidx(colID);
-        const offset_type beg = t_offsets[col];
-        const LO old_count =
-          Kokkos::atomic_fetch_sub (&t_counts[col], LO (1));
-        const LO len (t_offsets[col+1] - beg);
-        const offset_type insert_pos = beg + (len - old_count);
-        t_cols[insert_pos] = row;
-        t_vals[insert_pos] = rowView.value(colID);
-      }
-    });
-
-  // Invariant: At this point, all entries of t_counts are zero.
-  // This means we can use it to store new post-merge counts.
-
-  if (sort) {
-    // NOTE (mfh 11 Jul 2019) Merging is unnecessary: above
-    // parallel_for visits each row of the original matrix once, so
-    // there can be no duplicate column indices in the transpose.
-    using Details::shellSortKeysAndValues;
-    Kokkos::parallel_for
-      ("Sort rows of local transpose",
-       range_type (0, lclNumCols),
-       KOKKOS_LAMBDA (const LO lclCol) {
-        const offset_type beg = t_offsets[lclCol];
-        const LO len (t_offsets[lclCol+1] - t_offsets[lclCol]);
-
-        LO* cols_beg = t_cols.data () + beg;
-        IST* vals_beg = t_vals.data () + beg;
-        shellSortKeysAndValues (cols_beg, vals_beg, len);
-      });
-  }
-
-  local_matrix_type lclTransposeMatrix ("transpose", lclNumCols,
-                                        lclNumRows, nnz,
-                                        t_vals, t_offsets, t_cols);
+  const bool conjugate = false; // fix this later
+  local_matrix_type lclTransposeMatrix =
+    Details::localExplicitTranspose (lclMatrix, conjugate, sort);
 
   // Prebuild the importers and exporters the no-communication way,
   // flipping the importers and exporters around.
