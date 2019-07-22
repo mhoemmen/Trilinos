@@ -223,18 +223,12 @@ mklApply (MultiVectorType& Y,
   // now, pick something large enough to trigger full optimization.
   const int numExpectedCalls = 1000;
 
-  std::cerr << "MKL: solver constructor" << std::endl;
-
   solver_type solver (A.getLocalMatrix (), mode, uplo, diag,
                       numExpectedCalls);
 
-  // std::cerr << "MKL: setMatrix" << std::endl;
-  // solver.setMatrix (A.getLocalMatrix ()); // Just check syntax for now
+  solver.setMatrix (A.getLocalMatrix ()); // Just check syntax for now
 
-  std::cerr << "MKL: initialize" << std::endl;
   solver.initialize ();
-
-  std::cerr << "MKL: compute" << std::endl;
   solver.compute ();
 
   X.sync_host ();
@@ -243,28 +237,9 @@ mklApply (MultiVectorType& Y,
   auto X_lcl = X.getLocalViewHost ();
   auto Y_lcl = Y.getLocalViewHost ();
 
-  if (IST (beta) == KAT::zero ()) {
-    // Follow BLAS rules: overwrite initial contents of Y with zeros.
-    Kokkos::deep_copy (Y_lcl, KAT::zero ());
-    std::cerr << "MKL: apply" << std::endl;
-    solver.apply (X_lcl, Y_lcl, mode, IST (alpha));
-  }
-  else { // beta != 0
-    if (IST (alpha) == KAT::zero ()) {
-      Y.scale (beta); // Y := beta * Y
-    }
-    else { // alpha != 0
-      MV Y_tmp (Y, Teuchos::Copy);
-      Y_tmp.sync_host ();
-      auto Y_tmp_lcl = Y_tmp.getLocalViewHost ();
-      std::cerr << "MKL: apply" << std::endl;
-      solver.apply (X_lcl, Y_tmp_lcl, mode, IST (alpha));
+  solver.apply (X_lcl, Y_lcl, mode, IST (alpha), IST (beta));
 
-      Y_tmp.sync_device ();
-      Y.sync_device ();
-      Y.update (KAT::one (), Y_tmp, beta); // Y := beta * Y + Y_tmp
-    }
-  }
+  Y.sync_device ();
 }
 #endif // HAVE_IFPACK2_MKL
 
