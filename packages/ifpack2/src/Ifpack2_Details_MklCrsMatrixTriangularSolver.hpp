@@ -41,9 +41,11 @@
 #ifndef IFPACK2_DETAILS_MKLCRSMATRIXTRIANGULARSOLVER_HPP
 #define IFPACK2_DETAILS_MKLCRSMATRIXTRIANGULARSOLVER_HPP
 
-#include "Ifpack2_Details_MKL.hpp"
+#include "Ifpack2_config.h"
 #ifdef HAVE_IFPACK2_MKL
 
+#include "Ifpack2_Details_MKL.hpp"
+#include "Ifpack2_Details_LocalSolver.hpp"
 #include "Kokkos_Core.hpp"
 #include "Teuchos_any.hpp"
 
@@ -60,7 +62,8 @@ namespace MKL {
 /// Trilinos insists on calling abbreviating compressed sparse row as
 /// CRS for historical reasons.
 template<class LocalCrsMatrixType>
-class MklCrsMatrixTriangularSolver {
+class MklCrsMatrixTriangularSolver :
+    public ::Ifpack2::Details::LocalSolver<LocalCrsMatrixType> {
   static_assert (std::is_same<typename LocalCrsMatrixType::ordinal_type,
                               int>::value, "ordinal_type != int");
   using nc_offset_view_type =
@@ -87,18 +90,20 @@ public:
       numExpectedCalls_ (numExpectedCalls)
   {}
 
-  void setMatrix (const LocalCrsMatrixType& A) {
+  ~MklCrsMatrixTriangularSolver () override = default;
+
+  void setMatrix (const LocalCrsMatrixType& A) override {
     A_ = A;
     ptr_.reset ();
     handle_->reset ();
   }
 
-  void initialize () {
+  void initialize () override {
     ptr_ = makePtr (A_);
     handle_->reset (); // yes, -> not .
   }
 
-  void compute ()
+  void compute () override
   {
     // MKL doesn't offer separate interfaces for symbolic vs. numeric
     // setup, so we defer all setup (except ptr_) until "compute".
@@ -118,7 +123,7 @@ public:
            device_type, Kokkos::MemoryTraits<Kokkos::Unmanaged>> out,
          const Teuchos::ETransp mode,
          const value_type alpha,
-         const value_type beta) const
+         const value_type beta) const override
   {
     TEUCHOS_TEST_FOR_EXCEPTION
       (! handle_->initialized (), std::logic_error, "MKL handle is "
