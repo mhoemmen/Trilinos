@@ -4720,6 +4720,7 @@ namespace Tpetra {
     /// later use.
     mutable Teuchos::RCP<MV> exportMV_;
 
+  public:
     /// \brief Create a (or fetch a cached) column Map MultiVector.
     ///
     /// \param X_domainMap [in] A domain Map Multivector.  The
@@ -4768,6 +4769,7 @@ namespace Tpetra {
     getRowMapMultiVector (const MV& Y_rangeMap,
                           const bool force = false) const;
 
+  protected:
     //! Special case of apply() for <tt>mode == Teuchos::NO_TRANS</tt>.
     void
     applyNonTranspose (const MV& X_in,
