@@ -6436,7 +6436,7 @@ namespace Tpetra {
   void
   CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   applyCrsPadding(
-    const Kokkos::UnorderedMap<LocalOrdinal, size_t, device_type>& padding,
+    const typename crs_graph_type::padding_type& padding,
     const bool verbose)
   {
     using Details::ProfilingRegion;
@@ -6454,7 +6454,9 @@ namespace Tpetra {
     if (verbose) {
       prefix = this->createPrefix("CrsMatrix", tfecfFuncName);
       std::ostringstream os;
-      os << *prefix << "padding.size()=" << padding.size() << endl;
+      os << *prefix << "padding: ";
+      padding.print(os);
+      os << endl;
       std::cerr << os.str();
     }
     const int myRank = ! verbose ? -1 : [&] () {
@@ -6474,7 +6476,7 @@ namespace Tpetra {
       allocateValues(GlobalIndices, GraphNotYetAllocated, verbose);
     }
 
-    if (padding.size() == 0) {
+    if (padding.increase() == 0) {
       return;
     }
 
@@ -6753,8 +6755,8 @@ namespace Tpetra {
       auto padding =
         myGraph_->computeCrsPadding(srcGraph, numSameIDs,
           permuteToLIDs_dv, permuteFromLIDs_dv, verbose);
-      if (padding.size() != 0) {
-        applyCrsPadding(padding, verbose);
+      if (padding->increase() != 0) {
+        applyCrsPadding(*padding, verbose);
       }
     }
     const bool sourceIsLocallyIndexed = srcMat.isLocallyIndexed ();
@@ -6791,8 +6793,8 @@ namespace Tpetra {
         // copy.  Really it's the GIDs that have to be copied (because
         // they have to be converted from LIDs).
         size_t checkRowLength = 0;
-        srcMat.getGlobalRowCopy (sourceGID, rowIndsView, rowValsView, checkRowLength);
-
+        srcMat.getGlobalRowCopy (sourceGID, rowIndsView, rowValsView,
+                                 checkRowLength);
         if (debug) {
           TEUCHOS_TEST_FOR_EXCEPTION_CLASS_FUNC
             (rowLength != checkRowLength, std::logic_error, ": For "
@@ -7880,34 +7882,13 @@ namespace Tpetra {
                                    distor, combineMode);
     }
     else {
-      std::vector<size_t> paddingVec =
-        myGraph_->computePaddingForCrsMatrixUnpack(
-          importLIDs, imports, numPacketsPerLID, verbose);
-      using padding_type =
-        Kokkos::UnorderedMap<local_ordinal_type, size_t, device_type>;
-      const LO numImports = static_cast<LO>(importLIDs.extent(0));
-      padding_type padding (numImports);
-
-      // padding gets pre-filled on devic, but we're modifying it on
-      // host here, so we need to fence to ensure that device is done.
-      Kokkos::fence();
-
-      if (paddingVec.size() != 0) {
-        auto importLIDs_h = importLIDs.view_host();
-        for (LO whichImp = 0; whichImp < numImports; ++whichImp) {
-          const LO lclRowInd = importLIDs_h[whichImp];
-          auto result =
-            padding.insert(lclRowInd, paddingVec[whichImp]);
-          TEUCHOS_TEST_FOR_EXCEPTION_CLASS_FUNC
-            (result.failed(), std::runtime_error,
-             ": Unable to insert padding for LID " << lclRowInd);
+      {
+        auto padding =
+          myGraph_->computePaddingForCrsMatrixUnpack(
+            importLIDs, imports, numPacketsPerLID, verbose);
+        if (padding->increase() != 0) {
+          applyCrsPadding(*padding, verbose);
         }
-        TEUCHOS_TEST_FOR_EXCEPTION_CLASS_FUNC
-          (padding.failed_insert(), std::runtime_error,
-           ": Failed to insert one or more indices into padding map");
-      }
-      if (padding.size() != 0) {
-        applyCrsPadding(padding, verbose);
       }
       unpackAndCombineImplNonStatic(importLIDs, imports,
                                     numPacketsPerLID,
