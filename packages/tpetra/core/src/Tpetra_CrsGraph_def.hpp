@@ -5104,16 +5104,16 @@ namespace Tpetra {
       typename local_graph_type::entries_type::non_const_type;
     using range_policy =
       Kokkos::RangePolicy<execution_space, Kokkos::IndexType<LO>>;
+    const char tfecfFuncName[] = "applyCrsPadding";
     ProfilingRegion regionCAP("Tpetra::CrsGraph::applyCrsPadding");
 
     std::unique_ptr<std::string> prefix;
     if (verbose) {
-      prefix = this->createPrefix("CrsGraph", "applyCrsPadding");
+      prefix = this->createPrefix("CrsGraph", tfecfFuncName);
       std::ostringstream os;
       os << *prefix << "padding: ";
       padding.print(os);
-      os << endl << *prefix << "indicesAreAllocated: "
-         << (indicesAreAllocated() ? "true" : "false") << endl;
+      os << endl;
       std::cerr << os.str();
     }
     const int myRank = ! verbose ? -1 : [&] () {
@@ -5128,12 +5128,18 @@ namespace Tpetra {
       return comm->getRank();
     } ();
 
-    if (padding.increase() == 0) {
-      return;
-    }
+    // FIXME (mfh 10 Feb 2020) We shouldn't actually reallocate
+    // row_ptrs_beg or allocate row_ptrs_end unless the allocation
+    // size needs to increase.  That should be the job of
+    // padCrsArrays.
 
     // Assume global indexing we don't have any indices yet
     if (! indicesAreAllocated()) {
+      if (verbose) {
+        std::ostringstream os;
+        os << *prefix << "Call allocateIndices" << endl;
+        std::cerr << os.str();
+      }
       allocateIndices(GlobalIndices, verbose);
     }
     TEUCHOS_ASSERT( indicesAreAllocated() );
@@ -5154,13 +5160,15 @@ namespace Tpetra {
       k_rowPtrs_.extent(0));
     Kokkos::deep_copy(row_ptrs_beg, k_rowPtrs_);
 
-    const size_t N = (row_ptrs_beg.extent(0) == 0 ? 0 : row_ptrs_beg.extent(0) - 1);
+    const size_t N = row_ptrs_beg.extent(0) == 0 ? size_t(0) :
+      size_t(row_ptrs_beg.extent(0) - 1);
     if (verbose) {
       std::ostringstream os;
       os << *prefix << "Allocate row_ptrs_end: " << N << endl;
       std::cerr << os.str();
     }
-    row_ptrs_type row_ptrs_end("row_ptrs_end", N);
+    row_ptrs_type row_ptrs_end(
+      view_alloc("row_ptrs_end", WithoutInitializing), N);
 
     const bool refill_num_row_entries = k_numRowEntries_.extent(0) != 0;
     if (refill_num_row_entries) { // Case 1: Unpacked storage
@@ -5174,10 +5182,9 @@ namespace Tpetra {
         });
     }
     else {
-      // TODO (mfh 10 Feb 2020) Right now,
-      // mfh If packed storage, don't need row_ptrs_end to be separate allocation;
-      // could just have it alias row_ptrs_beg+1.
-      // Case 2: Packed storage
+      // FIXME (mfh 10 Feb 2020) Fix padCrsArrays so that if packed
+      // storage, we don't need row_ptr_end to be separate allocation;
+      // could just have it alias row_ptr_beg+1.
       Kokkos::parallel_for
         ("Fill end row pointers", range_policy(0, N),
          KOKKOS_LAMBDA (const size_t i) {

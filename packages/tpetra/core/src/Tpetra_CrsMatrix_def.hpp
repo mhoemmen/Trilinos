@@ -6442,9 +6442,12 @@ namespace Tpetra {
     using Details::ProfilingRegion;
     using Details::padCrsArrays;
     using std::endl;
+    using LO = local_ordinal_type;
     using execution_space = typename device_type::execution_space;
-    using row_ptrs_type = typename local_graph_type::row_map_type::non_const_type;
-    using range_policy = Kokkos::RangePolicy<execution_space, Kokkos::IndexType<LocalOrdinal>>;
+    using row_ptrs_type =
+      typename local_graph_type::row_map_type::non_const_type;
+    using range_policy =
+      Kokkos::RangePolicy<execution_space, Kokkos::IndexType<LO>>;
     const char tfecfFuncName[] = "applyCrsPadding";
     const char suffix[] =
       ".  Please report this bug to the Tpetra developers.";
@@ -6473,12 +6476,18 @@ namespace Tpetra {
 
     // NOTE (mfh 29 Jan 2020) This allocates the values array.
     if (! myGraph_->indicesAreAllocated()) {
+      if (verbose) {
+        std::ostringstream os;
+        os << *prefix << "Call allocateIndices" << endl;
+        std::cerr << os.str();
+      }
       allocateValues(GlobalIndices, GraphNotYetAllocated, verbose);
     }
 
-    if (padding.increase() == 0) {
-      return;
-    }
+    // FIXME (mfh 10 Feb 2020) We shouldn't actually reallocate
+    // row_ptrs_beg or allocate row_ptrs_end unless the allocation
+    // size needs to increase.  That should be the job of
+    // padCrsArrays.
 
     // Making copies here because k_rowPtrs_ has a const type. Otherwise, we
     // would use it directly.
@@ -6489,7 +6498,11 @@ namespace Tpetra {
          << myGraph_->k_rowPtrs_.extent(0) << endl;
       std::cerr << os.str();
     }
-    row_ptrs_type row_ptr_beg("row_ptr_beg", myGraph_->k_rowPtrs_.extent(0));
+    using Kokkos::view_alloc;
+    using Kokkos::WithoutInitializing;
+    row_ptrs_type row_ptr_beg(
+      view_alloc("row_ptr_beg", WithoutInitializing),
+      myGraph_->k_rowPtrs_.extent(0));
     Kokkos::deep_copy(row_ptr_beg, myGraph_->k_rowPtrs_);
 
     const size_t N = row_ptr_beg.extent(0) == 0 ? size_t(0) :
@@ -6499,25 +6512,26 @@ namespace Tpetra {
       os << *prefix << "Allocate row_ptrs_end: " << N << endl;
       std::cerr << os.str();
     }
-    row_ptrs_type row_ptr_end("row_ptr_end", N);
+    row_ptrs_type row_ptr_end(
+      view_alloc("row_ptr_end", WithoutInitializing), N);
 
-    bool refill_num_row_entries = false;
-    if (myGraph_->k_numRowEntries_.extent(0) > 0) {
-      // Case 1: Unpacked storage
-      refill_num_row_entries = true;
+    const bool refill_num_row_entries =
+      myGraph_->k_numRowEntries_.extent(0) != 0;
+
+    if (refill_num_row_entries) { // unpacked storage
+      // We can't assume correct *this capture until C++17, and it's
+      // likely more efficient just to capture what we need anyway.
       auto num_row_entries = myGraph_->k_numRowEntries_;
       Kokkos::parallel_for
         ("Fill end row pointers", range_policy(0, N),
          KOKKOS_LAMBDA (const size_t i) {
           row_ptr_end(i) = row_ptr_beg(i) + num_row_entries(i);
         });
-
-    } else {
-      // FIXME (mfh 04 Feb 2020) If packed storage, don't need
-      // row_ptr_end to be separate allocation; could just have it
-      // alias row_ptr_beg+1.
-      //
-      // Case 2: Packed storage
+    }
+    else {
+      // FIXME (mfh 04 Feb 2020) Fix padCrsArrays so that if packed
+      // storage, we don't need row_ptr_end to be separate allocation;
+      // could just have it alias row_ptr_beg+1.
       Kokkos::parallel_for
         ("Fill end row pointers", range_policy(0, N),
          KOKKOS_LAMBDA (const size_t i) {
@@ -6559,10 +6573,12 @@ namespace Tpetra {
 
     if (verbose) {
       std::ostringstream os;
-      os << *prefix << "Assign myGraph_->k_rowPtrs_: "
-         << "old=" << myGraph_->k_rowPtrs_.extent(0)
-         << ", new=" << row_ptr_beg.extent(0) << endl;
+      os << *prefix << "Assign myGraph_->k_rowPtrs_; "
+         << "old size: " << myGraph_->k_rowPtrs_.extent(0)
+         << ", new size: " << row_ptr_beg.extent(0) << endl;
       std::cerr << os.str();
+      TEUCHOS_ASSERT( myGraph_->k_rowPtrs_.extent(0) ==
+                      row_ptr_beg.extent(0) );
     }
     myGraph_->k_rowPtrs_ = row_ptr_beg;
   }
