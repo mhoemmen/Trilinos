@@ -289,7 +289,9 @@ pad_crs_arrays(
   Values values_new;
   if (action == PadCrsAction::INDICES_AND_VALUES) {
     const size_t newValsSize = newIndsSize;
-    values_new = make_uninitialized_view<Values>(
+    // NOTE (mfh 10 Feb 2020) If we don't initialize values_new here,
+    // then the CrsMatrix tests fail.
+    values_new = make_initialized_view<Values>(
       "Tpetra::CrsMatrix values", newValsSize, verbose, prefix.get());
   }
 
