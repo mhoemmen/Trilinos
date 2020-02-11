@@ -5569,6 +5569,9 @@ namespace Tpetra {
       // global column indices, then other stuff like the matrix
       // values in that row).
       const size_t numBytes = numPacketsPerLID_h[whichImport];
+      if (numBytes == 0) {
+        continue; // special case: no entries to unpack for this row
+      }
       LO origSrcNumEnt = 0;
       const size_t numEntBeg = offset;
       const size_t numEntLen =
