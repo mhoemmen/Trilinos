@@ -131,6 +131,11 @@ auto create_mirror_view(
   return Kokkos::create_mirror_view(memSpace, view);
 }
 
+enum class PadCrsAction {
+  INDICES_ONLY,
+  INDICES_AND_VALUES
+};
+
 /// \brief Implementation of padCrsArrays
 ///
 /// \param row_ptr_beg [in] Offset to beginning of each row.
@@ -142,6 +147,7 @@ auto create_mirror_view(
 template<class RowPtr, class Indices, class Values, class Padding>
 void
 pad_crs_arrays(
+  const PadCrsAction action,
   const RowPtr& row_ptr_beg,
   const RowPtr& row_ptr_end,
   Indices& indices,
@@ -265,6 +271,10 @@ pad_crs_arrays(
       os << endl;
       std::cerr << os.str();
     }
+
+    if (increase == 0) {
+      return;
+    }
     Kokkos::deep_copy(newAllocPerRow, newAllocPerRow_h);
   }
 
@@ -276,10 +286,9 @@ pad_crs_arrays(
     "Tpetra::CrsGraph column indices", newIndsSize, verbose,
     prefix.get());
 
-  const bool pad_values = values.extent(0) == indices.extent(0);
-  const size_t newValsSize = pad_values ? newIndsSize : size_t(0);
   Values values_new;
-  if (pad_values) {
+  if (action == PadCrsAction::INDICES_AND_VALUES) {
+    const size_t newValsSize = newIndsSize;
     values_new = make_uninitialized_view<Values>(
       "Tpetra::CrsMatrix values", newValsSize, verbose, prefix.get());
   }
@@ -316,7 +325,7 @@ pad_crs_arrays(
           // introduce two-level parallelism and use team copy.
           memcpy(newColInds.data(), oldColInds.data(),
                  numEnt * sizeof(inds_value_type));
-          if (pad_values) {
+          if (action == PadCrsAction::INDICES_AND_VALUES) {
             auto oldVals = subview(values, oldRange);
             auto newVals = subview(values_new, newRange);
             memcpy(newVals.data(), oldVals.data(),
@@ -512,8 +521,9 @@ padCrsArrays(
   using impl::pad_crs_arrays;
   // send empty values array
   Indices values;
-  pad_crs_arrays<RowPtr, Indices, Indices, Padding>(rowPtrBeg,
-    rowPtrEnd, indices, values, padding, my_rank, verbose);
+  pad_crs_arrays<RowPtr, Indices, Indices, Padding>(
+    impl::PadCrsAction::INDICES_ONLY, rowPtrBeg, rowPtrEnd,
+    indices, values, padding, my_rank, verbose);
 }
 
 template<class RowPtr, class Indices, class Values, class Padding>
@@ -528,8 +538,9 @@ padCrsArrays(
     const bool verbose)
 {
   using impl::pad_crs_arrays;
-  pad_crs_arrays<RowPtr, Indices, Values, Padding>(rowPtrBeg,
-    rowPtrEnd, indices, values, padding, my_rank, verbose);
+  pad_crs_arrays<RowPtr, Indices, Values, Padding>(
+    impl::PadCrsAction::INDICES_AND_VALUES, rowPtrBeg, rowPtrEnd,
+    indices, values, padding, my_rank, verbose);
 }
 
 /// \brief Insert new indices in to current list of indices
