@@ -4502,10 +4502,12 @@ namespace Tpetra {
     //! The local sparse matrix, wrapped in a multiply operator.
     std::shared_ptr<local_multiply_op_type> lclMatrix_;
 
+    // FIXME (mfh 22 Jun 2016, 28 Feb 2020) I would very much like to
+    // get rid of k_values1D_ at some point.  I find it confusing to
+    // have all these extra references lying around.
+
     /// \brief Sparse matrix values, as part of compressed sparse row
     ///   ("1-D") storage.
-    ///
-    /// Before allocation, this array is empty.
     typename local_matrix_type::values_type k_values1D_;
 
     /// \brief Status of the matrix's storage, when not in a
@@ -4517,7 +4519,7 @@ namespace Tpetra {
     /// parameter to fillComplete was false, the matrix may keep
     /// unpacked 1-D storage around and resume it on the next
     /// resumeFill call.
-    ::Tpetra::Details::EStorageStatus storageStatus_;
+    Details::EStorageStatus storageStatus_;
 
     //! Whether the matrix is fill complete.
     bool fillComplete_;
